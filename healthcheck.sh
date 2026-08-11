@@ -18,7 +18,7 @@
 #   c            Toggle CPU info panel
 # ==============================================================================
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -430,25 +430,34 @@ check_logs() {
 
 # --- ASCII Analog Clock ---
 generate_clock() {
-    date '+%H %M %S' | awk '{
+    date '+%H %M %S' | awk '
+    function lch(dx, dy,    adx, ady, vdy) {
+        adx = (dx >= 0) ? dx : -dx
+        ady = (dy >= 0) ? dy : -dy
+        vdy = ady * 2
+        if (vdy < adx * 0.4) return "-"
+        if (adx < vdy * 0.4) return "|"
+        if ((dx > 0 && dy > 0) || (dx < 0 && dy < 0)) return "\\"
+        return "/"
+    }
+    {
         hour = ($1 + 0) % 12
         min = $2 + 0
         sec = $3 + 0
 
-        W = 21; H = 11
-        cx = 10; cy = 5
-        rx = 9; ry = 4
+        W = 31; H = 21
+        cx = 15; cy = 9
+        rx = 14; ry = 7
         pi = atan2(0, -1)
 
-        # Init grid: 0=space 1=border 2=marker 3=cardinal 4=hhand 5=mhand 6=center
         for (y = 0; y < H; y++)
             for (x = 0; x < W; x++) {
                 g[y,x] = " "; t[y,x] = 0
             }
 
         # Circle outline
-        for (i = 0; i < 72; i++) {
-            a = i / 72.0 * 2 * pi - pi / 2
+        for (i = 0; i < 120; i++) {
+            a = i / 120.0 * 2 * pi - pi / 2
             px = int(cx + rx * cos(a) + 0.5)
             py = int(cy + ry * sin(a) + 0.5)
             if (px >= 0 && px < W && py >= 0 && py < H && t[py,px] == 0) {
@@ -456,48 +465,54 @@ generate_clock() {
             }
         }
 
-        # Hour markers
+        # Tick marks at hour positions (lines only, no numbers)
         for (i = 1; i <= 12; i++) {
             a = i / 12.0 * 2 * pi - pi / 2
-            px = int(cx + rx * cos(a) + 0.5)
-            py = int(cy + ry * sin(a) + 0.5)
-            if (i == 3) { g[py,px] = "3"; t[py,px] = 3 }
-            else if (i == 6) { g[py,px] = "6"; t[py,px] = 3 }
-            else if (i == 9) { g[py,px] = "9"; t[py,px] = 3 }
-            else if (i == 12) {
-                g[py,px] = "2"; t[py,px] = 3
-                if (px > 0) { g[py,px-1] = "1"; t[py,px-1] = 3 }
+            ca = cos(a); sa = sin(a)
+            ch = lch(ca, sa)
+
+            ox = int(cx + rx * ca + 0.5)
+            oy = int(cy + ry * sa + 0.5)
+            g[oy,ox] = ch; t[oy,ox] = 2
+
+            ix = int(cx + rx * 0.88 * ca + 0.5)
+            iy = int(cy + ry * 0.88 * sa + 0.5)
+            if (ix != ox || iy != oy) { g[iy,ix] = ch; t[iy,ix] = 2 }
+
+            if (i == 12 || i == 3 || i == 6 || i == 9) {
+                mx = int(cx + rx * 0.78 * ca + 0.5)
+                my = int(cy + ry * 0.78 * sa + 0.5)
+                g[my,mx] = ch; t[my,mx] = 3
+                nx = int(cx + rx * 0.72 * ca + 0.5)
+                ny = int(cy + ry * 0.72 * sa + 0.5)
+                if (nx != mx || ny != my) { g[ny,nx] = ch; t[ny,nx] = 3 }
             }
-            else { g[py,px] = "o"; t[py,px] = 2 }
         }
 
-        # Center
         g[cy,cx] = "+"; t[cy,cx] = 6
 
-        # Minute hand (longer)
+        # Minute hand
         ma = min / 60.0 * 2 * pi - pi / 2
-        for (s = 0.15; s <= 0.85; s += 0.02) {
+        mch = lch(cos(ma), sin(ma))
+        for (s = 0.1; s <= 0.82; s += 0.01) {
             mx = int(cx + rx * s * cos(ma) + 0.5)
             my = int(cy + ry * s * sin(ma) + 0.5)
             if (mx >= 0 && mx < W && my >= 0 && my < H)
-                if (t[my,mx] <= 1) { g[my,mx] = ":"; t[my,mx] = 5 }
+                if (t[my,mx] <= 1) { g[my,mx] = mch; t[my,mx] = 5 }
         }
 
-        # Hour hand (shorter, overwrites minute hand)
+        # Hour hand (overwrites minute)
         ha = (hour + min / 60.0) / 12.0 * 2 * pi - pi / 2
-        for (s = 0.15; s <= 0.55; s += 0.02) {
+        hch = lch(cos(ha), sin(ha))
+        for (s = 0.1; s <= 0.52; s += 0.01) {
             hx = int(cx + rx * s * cos(ha) + 0.5)
             hy = int(cy + ry * s * sin(ha) + 0.5)
             if (hx >= 0 && hx < W && hy >= 0 && hy < H)
-                if (t[hy,hx] <= 1 || t[hy,hx] == 5) { g[hy,hx] = "#"; t[hy,hx] = 4 }
+                if (t[hy,hx] <= 1 || t[hy,hx] == 5) { g[hy,hx] = hch; t[hy,hx] = 4 }
         }
 
-        # Render with ANSI colors
-        dim   = "\033[2m"
-        bold  = "\033[1m"
-        cyan  = "\033[0;36m"
-        yel   = "\033[1;33m"
-        nc    = "\033[0m"
+        dim = "\033[2m"; bold = "\033[1m"
+        cyan = "\033[0;36m"; yel = "\033[1;33m"; nc = "\033[0m"
 
         for (y = 0; y < H; y++) {
             line = ""
@@ -513,21 +528,18 @@ generate_clock() {
             }
             print line
         }
-        # Digital time centered below face
-        printf "      " bold
-        printf "%s%02d:%02d:%02d%s\n", bold, ($1+0), min, sec, nc
+        printf "           %s%02d:%02d:%02d%s\n", bold, ($1+0), min, sec, nc
     }'
 }
 
 draw_clock_overlay() {
     local cols
     cols=$(tput cols 2>/dev/null) || cols=80
-    local clock_width=21
+    local clock_width=31
     local start_col=$((cols - clock_width - 2))
     local start_row=1
 
-    # Skip if terminal is too narrow
-    if [ "$start_col" -lt 45 ]; then
+    if [ "$start_col" -lt 50 ]; then
         return
     fi
 
@@ -543,7 +555,16 @@ draw_clock_overlay() {
 }
 
 # --- Render one full frame into a buffer, then paint in-place ---
+PREV_COLS=0
+
 render_frame() {
+    local current_cols
+    current_cols=$(tput cols 2>/dev/null) || current_cols=80
+    if [ "$current_cols" -ne "$PREV_COLS" ]; then
+        clear
+        PREV_COLS=$current_cols
+    fi
+
     local buffer
     buffer=$(
         print_header
@@ -563,12 +584,9 @@ render_frame() {
         fi
     )
 
-    # Move cursor to top-left instead of clearing — no flicker
     tput cup 0 0 2>/dev/null
     echo -e "$buffer"
-    # Wipe any leftover lines from a previous longer frame
     tput ed 2>/dev/null
-    # Overlay the analog clock on the right side
     draw_clock_overlay
 }
 
