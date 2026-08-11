@@ -65,15 +65,6 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-# --- Terminal Cleanup on Exit ---
-cleanup() {
-    tput cnorm 2>/dev/null
-    stty echo 2>/dev/null
-    echo -e "\n${DIM}Dashboard stopped.${NC}"
-    exit 0
-}
-trap cleanup EXIT INT TERM
-
 # --- UI Helpers ---
 print_header() {
     local mode_label
@@ -308,32 +299,55 @@ check_logs() {
     echo ""
 }
 
-# --- Render one full frame ---
+# --- Render one full frame into a buffer, then paint in-place ---
 render_frame() {
-    clear
-    print_header
+    local buffer
+    buffer=$(
+        print_header
 
-    if [ "$LESS_MODE" = true ]; then
-        check_hardware
-        check_pihole_v6
-        check_logs
-    else
-        check_hardware
-        check_storage
-        check_pihole_v6
-        check_network_security
-        check_logs
-    fi
+        if [ "$LESS_MODE" = true ]; then
+            check_hardware
+            check_pihole_v6
+            check_logs
+        else
+            check_hardware
+            check_storage
+            check_pihole_v6
+            check_network_security
+            check_logs
+        fi
+    )
+
+    # Move cursor to top-left instead of clearing — no flicker
+    tput cup 0 0 2>/dev/null
+    echo -e "$buffer"
+    # Wipe any leftover lines from a previous longer frame
+    tput ed 2>/dev/null
 }
 
 # --- One-shot mode ---
 if [ "$ONESHOT" = true ]; then
+    clear
     render_frame
     exit 0
 fi
 
 # --- Interactive loop ---
 tput civis 2>/dev/null
+clear
+
+# Use alternate screen buffer so the original terminal is restored on exit
+tput smcup 2>/dev/null
+ALTSCREEN=true
+
+cleanup() {
+    tput cnorm 2>/dev/null
+    [ "$ALTSCREEN" = true ] && tput rmcup 2>/dev/null
+    stty echo 2>/dev/null
+    echo -e "\n${DIM}Dashboard stopped.${NC}"
+    exit 0
+}
+trap cleanup EXIT INT TERM
 
 while true; do
     render_frame
@@ -354,6 +368,8 @@ while true; do
                     else
                         LESS_MODE=true
                     fi
+                    # Full clear when toggling modes since line count changes
+                    clear
                     break
                     ;;
             esac
