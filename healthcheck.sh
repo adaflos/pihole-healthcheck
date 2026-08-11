@@ -15,16 +15,18 @@
 #   q / Ctrl-C   Quit
 #   r            Force immediate refresh
 #   l            Toggle log-only mode
+#   c            Toggle CPU info panel
 # ==============================================================================
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
 # --- Defaults ---
 LESS_MODE=false
-REFRESH=5
+REFRESH=3
 ONESHOT=false
+SHOW_CPU=false
 
 # --- Self-Update ---
 do_update() {
@@ -107,7 +109,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: healthcheck [-l|--less] [-n SECONDS] [-1|--once] [-u|--update] [-v|--version]"
             echo "  -l, --less        Log-only mode (minimal vitals + logs)"
-            echo "  -n, --interval N  Refresh every N seconds (default: 5)"
+            echo "  -n, --interval N  Refresh every N seconds (default: 3)"
             echo "  -1, --once        Run once and exit (no interactive loop)"
             echo "  -u, --update      Check for updates and install to ${INSTALL_PATH}"
             echo "  -v, --version     Show version and exit"
@@ -116,6 +118,7 @@ while [[ $# -gt 0 ]]; do
             echo "  q / Ctrl-C   Quit"
             echo "  r            Force immediate refresh"
             echo "  l            Toggle log-only mode"
+            echo "  c            Toggle CPU info panel"
             exit 0
             ;;
         *)
@@ -161,7 +164,7 @@ print_header() {
             "$(date '+%Y-%m-%d %H:%M:%S')" "$(uptime | awk -F'load average:' '{print $2}' | xargs)"
         echo -e "${CYAN}└──────────────────────────────────────────────────────────────────────────────┘${NC}"
     fi
-    echo -e " ${DIM}Mode: ${NC}${mode_label}  ${DIM}│  Refresh: ${NC}${REFRESH}s  ${DIM}│  Keys: ${NC}${BOLD}q${NC}${DIM}uit  ${NC}${BOLD}r${NC}${DIM}efresh  ${NC}${BOLD}l${NC}${DIM}og-toggle${NC}"
+    echo -e " ${DIM}Mode: ${NC}${mode_label}  ${DIM}│  Refresh: ${NC}${REFRESH}s  ${DIM}│  Keys: ${NC}${BOLD}q${NC}${DIM}uit  ${NC}${BOLD}r${NC}${DIM}efresh  ${NC}${BOLD}l${NC}${DIM}og-toggle  ${NC}${BOLD}c${NC}${DIM}pu-info${NC}"
     echo ""
 }
 
@@ -245,6 +248,62 @@ check_hardware() {
     else
         failed_names=$(systemctl --failed --no-legend | awk '{print $1}' | tr '\n' ' ')
         print_status "Systemd Health" "FAIL" "${failed_units} failed unit(s): ${failed_names}"
+    fi
+    echo ""
+}
+
+# --- 1b. CPU Info Panel (toggled with 'c') ---
+check_cpu_info() {
+    print_section "CPU INFORMATION"
+
+    if [ -f /proc/cpuinfo ]; then
+        local model cores
+        model=$(grep -m1 'model name' /proc/cpuinfo | cut -d':' -f2 | xargs)
+        model=${model:-$(grep -m1 'Model' /proc/cpuinfo | cut -d':' -f2 | xargs)}
+        cores=$(grep -c '^processor' /proc/cpuinfo)
+        print_status "CPU Model" "OK" "${model:-Unknown}"
+        print_status "CPU Cores" "OK" "${cores}"
+    fi
+
+    if [ -f /proc/loadavg ]; then
+        local load1 load5 load15 procs
+        read -r load1 load5 load15 procs _ < /proc/loadavg
+        print_status "Load Average" "OK" "${load1} / ${load5} / ${load15}  (1/5/15 min)"
+        print_status "Processes" "OK" "${procs}"
+    fi
+
+    if command -v vcgencmd &>/dev/null; then
+        local volts governor
+        volts=$(vcgencmd measure_volts core 2>/dev/null | awk -F'=' '{print $2}')
+        [ -n "$volts" ] && print_status "Core Voltage" "OK" "${volts}"
+
+        if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+            governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+            print_status "CPU Governor" "OK" "${governor}"
+        fi
+
+        local freq_min freq_max
+        [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq ] && \
+            freq_min=$(( $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq) / 1000 ))
+        [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq ] && \
+            freq_max=$(( $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq) / 1000 ))
+        [ -n "$freq_min" ] && [ -n "$freq_max" ] && \
+            print_status "Freq Range" "OK" "${freq_min} - ${freq_max} MHz"
+    else
+        if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+            local governor
+            governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+            print_status "CPU Governor" "OK" "${governor}"
+        fi
+    fi
+
+    local top_procs
+    top_procs=$(ps -eo pid,pcpu,comm --sort=-pcpu --no-headers | head -n 5)
+    if [ -n "$top_procs" ]; then
+        print_status "Top Processes (CPU)" "OK" ""
+        echo "$top_procs" | while read -r line; do
+            echo -e "      ${DIM}${line}${NC}"
+        done
     fi
     echo ""
 }
@@ -377,10 +436,12 @@ render_frame() {
 
         if [ "$LESS_MODE" = true ]; then
             check_hardware
+            [ "$SHOW_CPU" = true ] && check_cpu_info
             check_pihole_v6
             check_logs
         else
             check_hardware
+            [ "$SHOW_CPU" = true ] && check_cpu_info
             check_storage
             check_pihole_v6
             check_network_security
@@ -438,7 +499,15 @@ while true; do
                     else
                         LESS_MODE=true
                     fi
-                    # Full clear when toggling modes since line count changes
+                    clear
+                    break
+                    ;;
+                c|C)
+                    if [ "$SHOW_CPU" = true ]; then
+                        SHOW_CPU=false
+                    else
+                        SHOW_CPU=true
+                    fi
                     clear
                     break
                     ;;

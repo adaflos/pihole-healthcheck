@@ -57,6 +57,7 @@ After installing, run `healthcheck -u` anytime to update to the latest version f
 | `q` | Quit |
 | `r` | Force immediate refresh |
 | `l` | Toggle between full and log-only mode |
+| `c` | Toggle CPU info panel (model, cores, governor, top processes) |
 
 ## What It Monitors
 
