@@ -9,6 +9,7 @@
 #   Log-Only Mode:     ./healthcheck -l
 #   Custom Interval:   ./healthcheck -n 10   (refresh every 10 seconds)
 #   One-Shot Mode:     ./healthcheck -1       (run once and exit)
+#   Self-Update:       ./healthcheck -u
 #
 # Controls:
 #   q / Ctrl-C   Quit
@@ -16,10 +17,70 @@
 #   l            Toggle log-only mode
 # ==============================================================================
 
+VERSION="1.0.0"
+REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
+INSTALL_PATH="/usr/local/bin/healthcheck"
+
 # --- Defaults ---
 LESS_MODE=false
 REFRESH=5
 ONESHOT=false
+
+# --- Self-Update ---
+do_update() {
+    echo -e "${BOLD}Checking for updates...${NC}"
+    echo -e "  Installed version: ${CYAN}${VERSION}${NC}"
+
+    local tmp
+    tmp=$(mktemp) || { echo -e "  ${RED}Failed to create temp file.${NC}"; exit 1; }
+    trap "rm -f '$tmp'" RETURN
+
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$REPO_RAW" -o "$tmp" 2>/dev/null
+    elif command -v wget &>/dev/null; then
+        wget -qO "$tmp" "$REPO_RAW" 2>/dev/null
+    else
+        echo -e "  ${RED}Neither curl nor wget found. Cannot check for updates.${NC}"
+        exit 1
+    fi
+
+    if [ ! -s "$tmp" ]; then
+        echo -e "  ${RED}Failed to fetch remote script. Check your internet connection.${NC}"
+        exit 1
+    fi
+
+    local remote_version
+    remote_version=$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2)
+
+    if [ -z "$remote_version" ]; then
+        echo -e "  ${RED}Could not determine remote version.${NC}"
+        exit 1
+    fi
+
+    echo -e "  Remote version:    ${CYAN}${remote_version}${NC}"
+
+    local newer
+    newer=$(printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | tail -n1)
+
+    if [ "$newer" = "$VERSION" ]; then
+        echo -e "\n  ${GREEN}Already up to date.${NC}"
+        exit 0
+    fi
+
+    echo -e "\n  ${YELLOW}New version available: ${remote_version}${NC}"
+    echo -e "  Installing to ${BOLD}${INSTALL_PATH}${NC} ..."
+
+    if [ -w "$(dirname "$INSTALL_PATH")" ]; then
+        cp "$tmp" "$INSTALL_PATH"
+        chmod +x "$INSTALL_PATH"
+    else
+        sudo cp "$tmp" "$INSTALL_PATH"
+        sudo chmod +x "$INSTALL_PATH"
+    fi
+
+    echo -e "  ${GREEN}Updated to ${remote_version}!${NC}"
+    exit 0
+}
 
 # --- Parse Command Line Options ---
 while [[ $# -gt 0 ]]; do
@@ -36,11 +97,20 @@ while [[ $# -gt 0 ]]; do
             ONESHOT=true
             shift
             ;;
+        -u|--update)
+            do_update
+            ;;
+        -v|--version)
+            echo "healthcheck v${VERSION}"
+            exit 0
+            ;;
         -h|--help)
-            echo "Usage: healthcheck [-l|--less] [-n SECONDS] [-1|--once]"
+            echo "Usage: healthcheck [-l|--less] [-n SECONDS] [-1|--once] [-u|--update] [-v|--version]"
             echo "  -l, --less        Log-only mode (minimal vitals + logs)"
             echo "  -n, --interval N  Refresh every N seconds (default: 5)"
             echo "  -1, --once        Run once and exit (no interactive loop)"
+            echo "  -u, --update      Check for updates and install to ${INSTALL_PATH}"
+            echo "  -v, --version     Show version and exit"
             echo ""
             echo "Controls:"
             echo "  q / Ctrl-C   Quit"
@@ -76,14 +146,14 @@ print_header() {
 
     if [ "$LESS_MODE" = true ]; then
         echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────────────────┐${NC}"
-        echo -e "${CYAN}│${NC} ${BOLD}${PURPLE}  🍓 LIVE LOG & EVENT MONITOR (Pi-hole v6) ${NC}                           ${CYAN}│${NC}"
+        printf "${CYAN}│${NC} ${BOLD}${PURPLE}  🍓 LIVE LOG & EVENT MONITOR (Pi-hole v6) ${NC}              ${DIM}v%-12s${NC}${CYAN}│${NC}\n" "$VERSION"
         echo -e "${CYAN}├──────────────────────────────────────────────────────────────────────────────┤${NC}"
         printf "${CYAN}│${NC} ${BOLD}Host:${NC} %-12s ${BOLD}Time:${NC} %-25s ${BOLD}Load:${NC} %-15s ${CYAN}│${NC}\n" \
             "$(hostname)" "$(date '+%Y-%m-%d %H:%M:%S')" "$(uptime | awk -F'load average:' '{print $2}' | xargs)"
         echo -e "${CYAN}└──────────────────────────────────────────────────────────────────────────────┘${NC}"
     else
         echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────────────────┐${NC}"
-        echo -e "${CYAN}│${NC} ${BOLD}${PURPLE}  🍓 PI-HOLE v6 & PI ZERO 2 W DASHBOARD ${NC}                           ${CYAN}│${NC}"
+        printf "${CYAN}│${NC} ${BOLD}${PURPLE}  🍓 PI-HOLE v6 & PI ZERO 2 W DASHBOARD ${NC}               ${DIM}v%-12s${NC}${CYAN}│${NC}\n" "$VERSION"
         echo -e "${CYAN}├──────────────────────────────────────────────────────────────────────────────┤${NC}"
         printf "${CYAN}│${NC} ${BOLD}Host:${NC} %-12s ${BOLD}OS:${NC} %-18s ${BOLD}Uptime:${NC} %-17s ${CYAN}│${NC}\n" \
             "$(hostname)" "$(uname -s) $(uname -r | cut -d'-' -f1)" "$(uptime -p | sed 's/up //')"

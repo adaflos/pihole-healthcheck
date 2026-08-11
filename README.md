@@ -16,6 +16,7 @@ Interactive top-style terminal dashboard for monitoring a **Raspberry Pi Zero 2 
 - **Network status** — local IP, interface detection, internet connectivity
 - **Log auditing** — system errors, FTL events, OOM kills, failed SSH logins, live DNS traffic
 - **Portable** — no hardcoded IPs or hostnames; Pi-specific checks skip gracefully on other hardware
+- **Self-updating** — checks GitHub for new versions and installs with a single flag
 
 ## Quick Start
 
@@ -36,7 +37,18 @@ chmod +x healthcheck.sh
 ./healthcheck.sh -l             # Log-only mode (minimal vitals + logs)
 ./healthcheck.sh -n 10          # Custom refresh interval (10 seconds)
 ./healthcheck.sh -1             # One-shot mode (run once and exit)
+./healthcheck.sh -u             # Check for updates and install latest version
+./healthcheck.sh -v             # Print version
 ```
+
+## Install System-Wide
+
+```bash
+sudo cp healthcheck.sh /usr/local/bin/healthcheck
+sudo chmod +x /usr/local/bin/healthcheck
+```
+
+After installing, run `healthcheck -u` anytime to update to the latest version from GitHub.
 
 ## Keyboard Controls
 
