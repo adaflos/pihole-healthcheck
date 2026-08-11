@@ -18,13 +18,13 @@
 #   c            Toggle CPU info panel
 # ==============================================================================
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
 # --- Defaults ---
 LESS_MODE=false
-REFRESH=3
+REFRESH=1
 ONESHOT=false
 SHOW_CPU=false
 
@@ -109,7 +109,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: healthcheck [-l|--less] [-n SECONDS] [-1|--once] [-u|--update] [-v|--version]"
             echo "  -l, --less        Log-only mode (minimal vitals + logs)"
-            echo "  -n, --interval N  Refresh every N seconds (default: 3)"
+            echo "  -n, --interval N  Refresh every N seconds (default: 1)"
             echo "  -1, --once        Run once and exit (no interactive loop)"
             echo "  -u, --update      Check for updates and install to ${INSTALL_PATH}"
             echo "  -v, --version     Show version and exit"
@@ -428,6 +428,120 @@ check_logs() {
     echo ""
 }
 
+# --- ASCII Analog Clock ---
+generate_clock() {
+    date '+%H %M %S' | awk '{
+        hour = ($1 + 0) % 12
+        min = $2 + 0
+        sec = $3 + 0
+
+        W = 21; H = 11
+        cx = 10; cy = 5
+        rx = 9; ry = 4
+        pi = atan2(0, -1)
+
+        # Init grid: 0=space 1=border 2=marker 3=cardinal 4=hhand 5=mhand 6=center
+        for (y = 0; y < H; y++)
+            for (x = 0; x < W; x++) {
+                g[y,x] = " "; t[y,x] = 0
+            }
+
+        # Circle outline
+        for (i = 0; i < 72; i++) {
+            a = i / 72.0 * 2 * pi - pi / 2
+            px = int(cx + rx * cos(a) + 0.5)
+            py = int(cy + ry * sin(a) + 0.5)
+            if (px >= 0 && px < W && py >= 0 && py < H && t[py,px] == 0) {
+                g[py,px] = "."; t[py,px] = 1
+            }
+        }
+
+        # Hour markers
+        for (i = 1; i <= 12; i++) {
+            a = i / 12.0 * 2 * pi - pi / 2
+            px = int(cx + rx * cos(a) + 0.5)
+            py = int(cy + ry * sin(a) + 0.5)
+            if (i == 3) { g[py,px] = "3"; t[py,px] = 3 }
+            else if (i == 6) { g[py,px] = "6"; t[py,px] = 3 }
+            else if (i == 9) { g[py,px] = "9"; t[py,px] = 3 }
+            else if (i == 12) {
+                g[py,px] = "2"; t[py,px] = 3
+                if (px > 0) { g[py,px-1] = "1"; t[py,px-1] = 3 }
+            }
+            else { g[py,px] = "o"; t[py,px] = 2 }
+        }
+
+        # Center
+        g[cy,cx] = "+"; t[cy,cx] = 6
+
+        # Minute hand (longer)
+        ma = min / 60.0 * 2 * pi - pi / 2
+        for (s = 0.15; s <= 0.85; s += 0.02) {
+            mx = int(cx + rx * s * cos(ma) + 0.5)
+            my = int(cy + ry * s * sin(ma) + 0.5)
+            if (mx >= 0 && mx < W && my >= 0 && my < H)
+                if (t[my,mx] <= 1) { g[my,mx] = ":"; t[my,mx] = 5 }
+        }
+
+        # Hour hand (shorter, overwrites minute hand)
+        ha = (hour + min / 60.0) / 12.0 * 2 * pi - pi / 2
+        for (s = 0.15; s <= 0.55; s += 0.02) {
+            hx = int(cx + rx * s * cos(ha) + 0.5)
+            hy = int(cy + ry * s * sin(ha) + 0.5)
+            if (hx >= 0 && hx < W && hy >= 0 && hy < H)
+                if (t[hy,hx] <= 1 || t[hy,hx] == 5) { g[hy,hx] = "#"; t[hy,hx] = 4 }
+        }
+
+        # Render with ANSI colors
+        dim   = "\033[2m"
+        bold  = "\033[1m"
+        cyan  = "\033[0;36m"
+        yel   = "\033[1;33m"
+        nc    = "\033[0m"
+
+        for (y = 0; y < H; y++) {
+            line = ""
+            for (x = 0; x < W; x++) {
+                c = g[y,x]; tp = t[y,x]
+                if      (tp == 1) line = line dim c nc
+                else if (tp == 2) line = line bold c nc
+                else if (tp == 3) line = line bold c nc
+                else if (tp == 4) line = line yel c nc
+                else if (tp == 5) line = line cyan c nc
+                else if (tp == 6) line = line bold c nc
+                else              line = line c
+            }
+            print line
+        }
+        # Digital time centered below face
+        printf "      " bold
+        printf "%s%02d:%02d:%02d%s\n", bold, ($1+0), min, sec, nc
+    }'
+}
+
+draw_clock_overlay() {
+    local cols
+    cols=$(tput cols 2>/dev/null) || cols=80
+    local clock_width=21
+    local start_col=$((cols - clock_width - 2))
+    local start_row=1
+
+    # Skip if terminal is too narrow
+    if [ "$start_col" -lt 45 ]; then
+        return
+    fi
+
+    local clock_output
+    clock_output=$(generate_clock)
+
+    local row=$start_row
+    while IFS= read -r line; do
+        tput cup "$row" "$start_col" 2>/dev/null
+        echo -e "$line"
+        row=$((row + 1))
+    done <<< "$clock_output"
+}
+
 # --- Render one full frame into a buffer, then paint in-place ---
 render_frame() {
     local buffer
@@ -454,6 +568,8 @@ render_frame() {
     echo -e "$buffer"
     # Wipe any leftover lines from a previous longer frame
     tput ed 2>/dev/null
+    # Overlay the analog clock on the right side
+    draw_clock_overlay
 }
 
 # --- One-shot mode ---
