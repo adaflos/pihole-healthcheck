@@ -11,17 +11,19 @@
 #   Log-Only Mode:     ./healthcheck -l
 #   Custom Interval:   ./healthcheck -n 10    (refresh every 10 seconds)
 #   One-Shot Mode:     ./healthcheck -1       (run once and exit)
+#   JSON Output:       ./healthcheck --json   (structured JSON payload)
+#   No Color:          ./healthcheck -m       (plain output, no ANSI)
 #   Self-Update:       ./healthcheck -u
 #
 # Controls:
-#   q / Ctrl-C   Quit
-#   r            Force immediate refresh
-#   l            Toggle log-only mode
-#   c            Toggle CPU info panel
-#   p            Toggle Pi-hole mode
+#   q / Ctrl-C   Quit              d   Toggle Docker panel
+#   r            Force refresh      n   Toggle Network diagnostics
+#   l            Toggle log-only    s   Toggle Storage performance
+#   c            Toggle CPU info    t   Toggle Thermal sensors
+#   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.2.1"
+VERSION="1.3.0"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -41,12 +43,42 @@ LESS_MODE=false
 REFRESH=1
 ONESHOT=false
 SHOW_CPU=false
+SHOW_DOCKER=false
+SHOW_NETWORK=false
+SHOW_STORAGE_PERF=false
+SHOW_THERMAL=false
+SHOW_SECURITY=false
+JSON_MODE=false
+NO_COLOR=false
+LOG_FILE=""
+WEBHOOK_URL=""
 
-# Auto-detect Pi-hole: default to pihole mode only if pihole-FTL exists
+# --- Thresholds ---
+TEMP_LIMIT=75
+RAM_LIMIT=85
+DISK_LIMIT=90
+
+# --- Throughput tracking (must persist between frames) ---
+_prev_rx_bytes=0
+_prev_tx_bytes=0
+_prev_net_ts=0
+_prev_read_sectors=0
+_prev_write_sectors=0
+_prev_disk_ts=0
+
+# --- Auto-detect Pi-hole ---
 if command -v pihole &>/dev/null || systemctl list-unit-files pihole-FTL.service &>/dev/null; then
     PIHOLE_MODE=true
 else
     PIHOLE_MODE=false
+fi
+
+# --- Auto-detect container engine ---
+CONTAINER_ENGINE=""
+if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    CONTAINER_ENGINE="docker"
+elif command -v podman &>/dev/null; then
+    CONTAINER_ENGINE="podman"
 fi
 
 # --- Self-Update ---
@@ -132,6 +164,35 @@ while [[ $# -gt 0 ]]; do
             PIHOLE_MODE=true
             shift
             ;;
+        -m|--no-color)
+            NO_COLOR=true
+            shift
+            ;;
+        --json)
+            JSON_MODE=true
+            ONESHOT=true
+            shift
+            ;;
+        --temp-limit)
+            TEMP_LIMIT="$2"
+            shift 2
+            ;;
+        --ram-limit)
+            RAM_LIMIT="$2"
+            shift 2
+            ;;
+        --disk-limit)
+            DISK_LIMIT="$2"
+            shift 2
+            ;;
+        --webhook)
+            WEBHOOK_URL="$2"
+            shift 2
+            ;;
+        --log-file)
+            LOG_FILE="$2"
+            shift 2
+            ;;
         -u|--update)
             do_update
             ;;
@@ -140,25 +201,34 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -h|--help)
-            echo "Usage: healthcheck [-r|--regular] [-p|--pihole] [-l|--less] [-n SECONDS] [-1|--once] [-u|--update] [-v|--version]"
-            echo ""
-            echo "Modes:"
-            echo "  -r, --regular     System-only mode (no Pi-hole checks)"
-            echo "  -p, --pihole      Force Pi-hole mode (auto-detected by default)"
-            echo "  -l, --less        Log-only mode (minimal vitals + logs)"
-            echo "  -1, --once        Run once and exit (no interactive loop)"
-            echo ""
-            echo "Options:"
-            echo "  -n, --interval N  Refresh every N seconds (default: 1)"
-            echo "  -u, --update      Check for updates and install to ${INSTALL_PATH}"
-            echo "  -v, --version     Show version and exit"
-            echo ""
-            echo "Controls:"
-            echo "  q / Ctrl-C   Quit"
-            echo "  r            Force immediate refresh"
-            echo "  l            Toggle log-only mode"
-            echo "  c            Toggle CPU info panel"
-            echo "  p            Toggle Pi-hole mode"
+            cat <<'HELPEOF'
+Usage: healthcheck [OPTIONS]
+
+Modes:
+  -r, --regular        System-only mode (no Pi-hole checks)
+  -p, --pihole         Force Pi-hole mode (auto-detected by default)
+  -l, --less           Log-only mode (minimal vitals + logs)
+  -1, --once           Run once and exit (no interactive loop)
+  --json               Output structured JSON and exit
+
+Options:
+  -n, --interval N     Refresh every N seconds (default: 1)
+  -m, --no-color       Disable ANSI colors (for piping or plain terminals)
+  --temp-limit N       CPU temp warning threshold in °C (default: 75)
+  --ram-limit N        RAM usage warning threshold in % (default: 85)
+  --disk-limit N       Disk usage warning threshold in % (default: 90)
+  --webhook URL        Send alerts to webhook when thresholds are breached
+  --log-file PATH      Append JSON snapshots to file on each refresh
+  -u, --update         Check for updates and install latest version
+  -v, --version        Show version and exit
+
+Interactive Controls:
+  q / Ctrl-C   Quit              d   Toggle Docker panel
+  r            Force refresh      n   Toggle Network diagnostics
+  l            Toggle log-only    s   Toggle Storage performance
+  c            Toggle CPU info    t   Toggle Thermal sensors
+  p            Toggle Pi-hole     a   Toggle Security audit
+HELPEOF
             exit 0
             ;;
         *)
@@ -166,6 +236,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# --- Apply no-color mode ---
+if [ "$NO_COLOR" = true ]; then
+    GREEN="" YELLOW="" RED="" CYAN="" BLUE="" PURPLE="" BOLD="" DIM="" NC=""
+fi
 
 # --- OS Detection & Logo ---
 OS_ID="linux"
@@ -360,7 +435,7 @@ print_header() {
     else
         pihole_label="${CYAN}SYSTEM${NC}"
     fi
-    echo -e " ${DIM}View: ${NC}${mode_label}  ${DIM}│  Scope: ${NC}${pihole_label}  ${DIM}│  Refresh: ${NC}${REFRESH}s  ${DIM}│  ${NC}${BOLD}q${NC}${DIM}uit ${NC}${BOLD}r${NC}${DIM}efresh ${NC}${BOLD}l${NC}${DIM}og ${NC}${BOLD}c${NC}${DIM}pu ${NC}${BOLD}p${NC}${DIM}ihole${NC}"
+    echo -e " ${DIM}View: ${NC}${mode_label}  ${DIM}│  Scope: ${NC}${pihole_label}  ${DIM}│  Refresh: ${NC}${REFRESH}s  ${DIM}│  ${NC}${BOLD}q${NC}${DIM}uit ${NC}${BOLD}r${NC}${DIM}efresh ${NC}${BOLD}l${NC}${DIM}og ${NC}${BOLD}c${NC}${DIM}pu ${NC}${BOLD}p${NC}${DIM}ihole ${NC}${BOLD}d${NC}${DIM}ocker ${NC}${BOLD}n${NC}${DIM}et ${NC}${BOLD}s${NC}${DIM}tor ${NC}${BOLD}t${NC}${DIM}herm ${NC}${BOLD}a${NC}${DIM}udit${NC}"
     echo ""
 }
 
@@ -389,8 +464,8 @@ draw_progress_bar() {
     local bar=""
 
     local color=$GREEN
-    if [ "$pct" -ge 80 ]; then color=$YELLOW; fi
-    if [ "$pct" -ge 90 ]; then color=$RED; fi
+    if [ "$pct" -gt 50 ]; then color=$YELLOW; fi
+    if [ "$pct" -gt 75 ]; then color=$RED; fi
 
     bar+="${color}"
     for ((i=0; i<filled; i++)); do bar+="█"; done
@@ -400,6 +475,10 @@ draw_progress_bar() {
 
     echo -e "[${bar}] ${pct}%"
 }
+
+# ==============================================================================
+# CHECK FUNCTIONS
+# ==============================================================================
 
 # --- 1. Hardware & Thermal Engine ---
 check_hardware() {
@@ -412,9 +491,9 @@ check_hardware() {
         freq_raw=${freq_raw:-0}
         freq_mhz=$(( freq_raw / 1000000 ))
 
-        if [ "$temp_int" -lt 68 ]; then
+        if [ "$temp_int" -lt "$TEMP_LIMIT" ]; then
             print_status "CPU Temp" "OK" "${temp_raw}°C (${freq_mhz} MHz)"
-        elif [ "$temp_int" -lt 78 ]; then
+        elif [ "$temp_int" -lt $(( TEMP_LIMIT + 10 )) ]; then
             print_status "CPU Temp" "WARN" "${temp_raw}°C (${freq_mhz} MHz - High)"
         else
             print_status "CPU Temp" "FAIL" "${temp_raw}°C (${freq_mhz} MHz - Critical Throttle)"
@@ -426,20 +505,31 @@ check_hardware() {
         else
             print_status "Power & Throttling" "WARN" "Flag: ${throttled} (Check power supply)"
         fi
+    elif [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+        temp_raw=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp)
+        temp_int=${temp_raw%.*}
+        if [ "$temp_int" -lt "$TEMP_LIMIT" ]; then
+            print_status "CPU Temp" "OK" "${temp_raw}°C"
+        elif [ "$temp_int" -lt $(( TEMP_LIMIT + 10 )) ]; then
+            print_status "CPU Temp" "WARN" "${temp_raw}°C (High)"
+        else
+            print_status "CPU Temp" "FAIL" "${temp_raw}°C (Critical)"
+        fi
     fi
 
     ram_total=$(free -m | awk '/^Mem:/{print $2}')
     ram_used=$(free -m | awk '/^Mem:/{print $3}')
+    ram_total=${ram_total:-1}
     ram_pct=$(( ram_used * 100 / ram_total ))
     ram_bar=$(draw_progress_bar "$ram_pct")
 
-    if [ "$ram_pct" -lt 80 ]; then
+    if [ "$ram_pct" -lt "$RAM_LIMIT" ]; then
         print_status "RAM Usage" "OK" "${ram_used}MB / ${ram_total}MB ${ram_bar}"
     else
         print_status "RAM Usage" "WARN" "${ram_used}MB / ${ram_total}MB ${ram_bar} (High Memory Pressure)"
     fi
 
-    failed_units=$(systemctl --failed --no-legend | wc -l)
+    failed_units=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
     if [ "$failed_units" -eq 0 ]; then
         print_status "Systemd Health" "OK" "0 failed system units"
     else
@@ -514,7 +604,7 @@ check_storage() {
     disk_free=$(df -h / | awk 'NR==2 {print $4}')
     disk_bar=$(draw_progress_bar "$disk_usage")
 
-    if [ "$disk_usage" -lt 80 ]; then
+    if [ "$disk_usage" -lt "$DISK_LIMIT" ]; then
         print_status "Total Root Space (/)" "OK" "${disk_free} free ${disk_bar}"
     else
         print_status "Total Root Space (/)" "WARN" "${disk_free} free ${disk_bar}"
@@ -531,6 +621,100 @@ check_storage() {
         print_status "SD Card Health" "FAIL" "Kernel logged I/O errors in dmesg"
     else
         print_status "SD Card Health" "OK" "No SD card I/O errors"
+    fi
+    echo ""
+}
+
+# --- 2b. Storage Performance (toggled with 's') ---
+check_storage_performance() {
+    print_section "STORAGE PERFORMANCE & ARRAYS"
+
+    # I/O Wait
+    if [ -f /proc/stat ]; then
+        local cpu_line iowait_val
+        cpu_line=$(head -1 /proc/stat)
+        iowait_val=$(echo "$cpu_line" | awk '{total=0; for(i=2;i<=NF;i++) total+=$i; if(total>0) printf "%.1f", $7*100/total; else print "0"}')
+        local iow_int=${iowait_val%.*}
+        if [ "${iow_int:-0}" -lt 5 ]; then
+            print_status "I/O Wait" "OK" "${iowait_val}%"
+        elif [ "${iow_int:-0}" -lt 20 ]; then
+            print_status "I/O Wait" "WARN" "${iowait_val}% (Disk bottleneck possible)"
+        else
+            print_status "I/O Wait" "FAIL" "${iowait_val}% (High disk latency)"
+        fi
+    fi
+
+    # Live Disk Throughput
+    if [ -f /proc/diskstats ]; then
+        local root_dev
+        root_dev=$(df / | awk 'NR==2 {print $1}' | sed 's|/dev/||; s|[0-9]*$||; s|p$||')
+        if [ -n "$root_dev" ]; then
+            local read_sectors write_sectors now_ts
+            read_sectors=$(awk -v dev="$root_dev" '$3==dev {print $6}' /proc/diskstats 2>/dev/null)
+            write_sectors=$(awk -v dev="$root_dev" '$3==dev {print $10}' /proc/diskstats 2>/dev/null)
+            now_ts=$(date +%s)
+
+            read_sectors=${read_sectors:-0}
+            write_sectors=${write_sectors:-0}
+
+            if [ "$_prev_disk_ts" -gt 0 ] && [ "$now_ts" -gt "$_prev_disk_ts" ]; then
+                local dt=$(( now_ts - _prev_disk_ts ))
+                local dr=$(( (read_sectors - _prev_read_sectors) * 512 / 1024 / dt ))
+                local dw=$(( (write_sectors - _prev_write_sectors) * 512 / 1024 / dt ))
+                print_status "Disk Read" "OK" "${dr} KB/s"
+                print_status "Disk Write" "OK" "${dw} KB/s"
+            else
+                print_status "Disk Throughput" "OK" "Measuring..."
+            fi
+        fi
+    fi
+
+    # S.M.A.R.T. Health
+    if command -v smartctl &>/dev/null; then
+        local smart_devs
+        smart_devs=$(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2=="disk" {print $1}' | head -3)
+        for dev in $smart_devs; do
+            local smart_health
+            smart_health=$(smartctl -H "/dev/$dev" 2>/dev/null | grep -i 'overall-health\|SMART Health Status' | awk -F: '{print $2}' | xargs)
+            if [ -n "$smart_health" ]; then
+                if echo "$smart_health" | grep -iq 'passed\|ok'; then
+                    print_status "S.M.A.R.T. ($dev)" "OK" "$smart_health"
+                else
+                    print_status "S.M.A.R.T. ($dev)" "FAIL" "$smart_health"
+                fi
+            fi
+        done
+    fi
+
+    # RAID / ZFS / Btrfs
+    if [ -f /proc/mdstat ]; then
+        local md_status
+        md_status=$(grep -c '\[.*_.*\]' /proc/mdstat 2>/dev/null)
+        if [ "${md_status:-0}" -gt 0 ]; then
+            print_status "MD RAID" "FAIL" "Degraded array detected"
+        elif grep -q '^md' /proc/mdstat 2>/dev/null; then
+            print_status "MD RAID" "OK" "All arrays healthy"
+        fi
+    fi
+
+    if command -v zpool &>/dev/null; then
+        local zpool_health
+        zpool_health=$(zpool status -x 2>/dev/null)
+        if echo "$zpool_health" | grep -q "all pools are healthy"; then
+            print_status "ZFS Pools" "OK" "All pools healthy"
+        elif [ -n "$zpool_health" ]; then
+            print_status "ZFS Pools" "FAIL" "Degraded or faulted pool"
+        fi
+    fi
+
+    if command -v btrfs &>/dev/null; then
+        local btrfs_errs
+        btrfs_errs=$(btrfs device stats / 2>/dev/null | awk '{sum+=$NF} END{print sum+0}')
+        if [ "${btrfs_errs:-0}" -eq 0 ]; then
+            print_status "Btrfs Health" "OK" "No device errors"
+        else
+            print_status "Btrfs Health" "WARN" "${btrfs_errs} error(s) detected"
+        fi
     fi
     echo ""
 }
@@ -576,7 +760,302 @@ check_network_security() {
     echo ""
 }
 
-# --- 5. Logs & System Audit (Live Stream) ---
+# --- 4b. Network Diagnostics (toggled with 'n') ---
+check_network_diagnostics() {
+    print_section "NETWORK & PORT DIAGNOSTICS"
+
+    # Active Connections Summary
+    if command -v ss &>/dev/null; then
+        local estab listen tw
+        estab=$(ss -t state established 2>/dev/null | tail -n +2 | wc -l)
+        listen=$(ss -tln 2>/dev/null | tail -n +2 | wc -l)
+        tw=$(ss -t state time-wait 2>/dev/null | tail -n +2 | wc -l)
+        print_status "TCP Connections" "OK" "ESTAB: ${estab}  LISTEN: ${listen}  TIME_WAIT: ${tw}"
+
+        # Port Listener Audit
+        local listeners
+        listeners=$(ss -tulpn 2>/dev/null | awk 'NR>1 {
+            split($5, a, ":");
+            port = a[length(a)];
+            proc = $7;
+            gsub(/.*"/, "", proc); gsub(/".*/, "", proc);
+            if (port+0 > 0) printf "      %-8s %s\n", port, proc
+        }' | sort -t' ' -k1 -n | head -8)
+        if [ -n "$listeners" ]; then
+            print_status "Listening Ports" "OK" "Top listeners:"
+            echo -e "${DIM}${listeners}${NC}"
+        fi
+    fi
+
+    # DNS Latency Matrix
+    if command -v dig &>/dev/null; then
+        local dns_servers=("1.1.1.1:Cloudflare" "8.8.8.8:Google")
+        if [ "$PIHOLE_MODE" = true ]; then
+            dns_servers+=("127.0.0.1:Pi-hole")
+        fi
+
+        local dns_results=""
+        for entry in "${dns_servers[@]}"; do
+            local srv=${entry%%:*}
+            local name=${entry##*:}
+            local ms
+            ms=$(dig @"$srv" example.com +time=2 +tries=1 2>/dev/null | awk '/Query time:/ {print $4}')
+            ms=${ms:-"timeout"}
+            dns_results+="${name}: ${ms}ms  "
+        done
+        print_status "DNS Latency" "OK" "$dns_results"
+    fi
+
+    # Live Network Throughput
+    if [ -n "$main_iface" ] && [ -f /proc/net/dev ]; then
+        local rx_bytes tx_bytes now_ts
+        read -r rx_bytes tx_bytes <<< "$(awk -v iface="$main_iface" '$0 ~ iface":" {gsub(/.*:/, "", $0); print $1, $9}' /proc/net/dev)"
+        now_ts=$(date +%s)
+
+        rx_bytes=${rx_bytes:-0}
+        tx_bytes=${tx_bytes:-0}
+
+        if [ "$_prev_net_ts" -gt 0 ] && [ "$now_ts" -gt "$_prev_net_ts" ]; then
+            local dt=$(( now_ts - _prev_net_ts ))
+            local rx_rate=$(( (rx_bytes - _prev_rx_bytes) / 1024 / dt ))
+            local tx_rate=$(( (tx_bytes - _prev_tx_bytes) / 1024 / dt ))
+
+            local rx_unit="KB/s" tx_unit="KB/s"
+            if [ "$rx_rate" -gt 1024 ]; then
+                rx_rate=$(( rx_rate / 1024 ))
+                rx_unit="MB/s"
+            fi
+            if [ "$tx_rate" -gt 1024 ]; then
+                tx_rate=$(( tx_rate / 1024 ))
+                tx_unit="MB/s"
+            fi
+            print_status "RX Throughput" "OK" "${rx_rate} ${rx_unit} (${main_iface})"
+            print_status "TX Throughput" "OK" "${tx_rate} ${tx_unit} (${main_iface})"
+        else
+            print_status "Net Throughput" "OK" "Measuring..."
+        fi
+    fi
+    echo ""
+}
+
+# --- 5. Docker / Container Health (toggled with 'd') ---
+check_docker() {
+    print_section "DOCKER & CONTAINER HEALTH"
+
+    if [ -z "$CONTAINER_ENGINE" ]; then
+        print_status "Container Engine" "WARN" "No Docker or Podman detected"
+        echo ""
+        return
+    fi
+
+    print_status "Container Engine" "OK" "${CONTAINER_ENGINE}"
+
+    local running stopped unhealthy
+    running=$($CONTAINER_ENGINE ps -q 2>/dev/null | wc -l)
+    stopped=$($CONTAINER_ENGINE ps -aq --filter "status=exited" 2>/dev/null | wc -l)
+    unhealthy=$($CONTAINER_ENGINE ps --filter "health=unhealthy" -q 2>/dev/null | wc -l)
+
+    local status="OK"
+    [ "$unhealthy" -gt 0 ] && status="WARN"
+    print_status "Containers" "$status" "Running: ${running}  Stopped: ${stopped}  Unhealthy: ${unhealthy}"
+
+    # Restart loops
+    local restarting
+    restarting=$($CONTAINER_ENGINE ps --filter "status=restarting" --format '{{.Names}}' 2>/dev/null | head -3)
+    if [ -n "$restarting" ]; then
+        print_status "Restart Loops" "FAIL" "$(echo "$restarting" | tr '\n' ' ')"
+    fi
+
+    # Top 3 by CPU/Memory
+    if [ "$running" -gt 0 ]; then
+        local top_containers
+        top_containers=$($CONTAINER_ENGINE stats --no-stream --format "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | sort -t$'\t' -k2 -rn | head -3)
+        if [ -n "$top_containers" ]; then
+            print_status "Top Containers" "OK" "(by CPU)"
+            echo "$top_containers" | while IFS=$'\t' read -r name cpu mem; do
+                printf "      ${DIM}%-25s CPU: %-8s MEM: %s${NC}\n" "$name" "$cpu" "$mem"
+            done
+        fi
+    fi
+    echo ""
+}
+
+# --- 6. Thermal & Hardware Sensors (toggled with 't') ---
+check_thermal_expanded() {
+    print_section "THERMAL & HARDWARE SENSORS"
+
+    # Drive Temperatures
+    if command -v smartctl &>/dev/null; then
+        local smart_devs
+        smart_devs=$(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2=="disk" {print $1}' | head -4)
+        for dev in $smart_devs; do
+            local drive_temp
+            drive_temp=$(smartctl -A "/dev/$dev" 2>/dev/null | awk '/Temperature_Celsius|Airflow_Temperature/ {print $10}' | head -1)
+            if [ -z "$drive_temp" ]; then
+                drive_temp=$(smartctl -A "/dev/$dev" 2>/dev/null | awk '/Temperature:/ {print $2}' | head -1)
+            fi
+            if [ -n "$drive_temp" ] && [ "$drive_temp" -gt 0 ] 2>/dev/null; then
+                local dstat="OK"
+                [ "$drive_temp" -gt 50 ] && dstat="WARN"
+                [ "$drive_temp" -gt 60 ] && dstat="FAIL"
+                print_status "Drive Temp ($dev)" "$dstat" "${drive_temp}°C"
+            fi
+        done
+    fi
+
+    # Fan Speeds
+    if command -v sensors &>/dev/null; then
+        local fans
+        fans=$(sensors 2>/dev/null | grep -i 'fan' | grep -oP '\d+ RPM' | head -4)
+        if [ -n "$fans" ]; then
+            local i=1
+            echo "$fans" | while read -r rpm; do
+                print_status "Fan $i" "OK" "$rpm"
+                i=$((i+1))
+            done
+        fi
+    fi
+
+    # Power / UPS / Battery
+    if [ -d /sys/class/power_supply ]; then
+        for ps_path in /sys/class/power_supply/*/; do
+            local ps_name ps_type ps_status
+            ps_name=$(basename "$ps_path")
+            ps_type=$(cat "$ps_path/type" 2>/dev/null)
+            ps_status=$(cat "$ps_path/status" 2>/dev/null)
+
+            if [ "$ps_type" = "Battery" ]; then
+                local capacity
+                capacity=$(cat "$ps_path/capacity" 2>/dev/null)
+                if [ -n "$capacity" ]; then
+                    local bstat="OK"
+                    [ "$capacity" -lt 20 ] && bstat="WARN"
+                    [ "$capacity" -lt 5 ] && bstat="FAIL"
+                    local bbar
+                    bbar=$(draw_progress_bar "$capacity")
+                    print_status "Battery ($ps_name)" "$bstat" "${ps_status} ${bbar}"
+                fi
+            fi
+        done
+    fi
+
+    if command -v upsc &>/dev/null; then
+        local ups_name
+        ups_name=$(upsc -l 2>/dev/null | head -1)
+        if [ -n "$ups_name" ]; then
+            local ups_status ups_charge ups_runtime
+            ups_status=$(upsc "$ups_name" ups.status 2>/dev/null)
+            ups_charge=$(upsc "$ups_name" battery.charge 2>/dev/null)
+            ups_runtime=$(upsc "$ups_name" battery.runtime 2>/dev/null)
+
+            local ustat="OK"
+            [ "$ups_status" != "OL" ] && ustat="WARN"
+            print_status "UPS ($ups_name)" "$ustat" "Status: ${ups_status:-Unknown}"
+            [ -n "$ups_charge" ] && print_status "UPS Battery" "OK" "${ups_charge}%  Runtime: ${ups_runtime:-?}s"
+        fi
+    fi
+    echo ""
+}
+
+# --- 7. Security & System Audit (toggled with 'a') ---
+check_security_audit() {
+    print_section "SECURITY & SYSTEM AUDIT"
+
+    # Firewall Status
+    if command -v ufw &>/dev/null; then
+        local ufw_status
+        ufw_status=$(ufw status 2>/dev/null | head -1)
+        if echo "$ufw_status" | grep -qi "active"; then
+            local rule_count
+            rule_count=$(ufw status 2>/dev/null | grep -c "ALLOW\|DENY\|REJECT")
+            print_status "Firewall (ufw)" "OK" "Active (${rule_count} rules)"
+        else
+            print_status "Firewall (ufw)" "WARN" "Inactive"
+        fi
+    elif command -v nft &>/dev/null; then
+        local nft_rules
+        nft_rules=$(nft list ruleset 2>/dev/null | grep -c "rule")
+        if [ "${nft_rules:-0}" -gt 0 ]; then
+            print_status "Firewall (nftables)" "OK" "${nft_rules} rules loaded"
+        else
+            print_status "Firewall (nftables)" "WARN" "No rules loaded"
+        fi
+    elif command -v iptables &>/dev/null; then
+        local ipt_rules
+        ipt_rules=$(iptables -L -n 2>/dev/null | grep -c "^[A-Z]")
+        print_status "Firewall (iptables)" "OK" "${ipt_rules:-0} chain(s)"
+    else
+        print_status "Firewall" "WARN" "No firewall detected"
+    fi
+
+    # Fail2ban
+    if command -v fail2ban-client &>/dev/null; then
+        local jails banned
+        jails=$(fail2ban-client status 2>/dev/null | grep "Number of jail" | awk '{print $NF}')
+        banned=$(fail2ban-client status 2>/dev/null | grep -c "Currently banned")
+        if [ -n "$jails" ]; then
+            local total_banned=0
+            for jail in $(fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*://;s/,/ /g'); do
+                local jb
+                jb=$(fail2ban-client status "$jail" 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
+                total_banned=$(( total_banned + ${jb:-0} ))
+            done
+            print_status "Fail2ban" "OK" "${jails} jail(s), ${total_banned} banned IP(s)"
+        fi
+    fi
+
+    # Pending Updates
+    if command -v apt &>/dev/null; then
+        local updates
+        updates=$(apt list --upgradable 2>/dev/null | grep -c "upgradable")
+        if [ "${updates:-0}" -gt 0 ]; then
+            print_status "Pending Updates" "WARN" "${updates} package(s) upgradable"
+        else
+            print_status "Pending Updates" "OK" "System up to date"
+        fi
+    elif command -v checkupdates &>/dev/null; then
+        local updates
+        updates=$(checkupdates 2>/dev/null | wc -l)
+        if [ "${updates:-0}" -gt 0 ]; then
+            print_status "Pending Updates" "WARN" "${updates} package(s) available"
+        else
+            print_status "Pending Updates" "OK" "System up to date"
+        fi
+    elif command -v dnf &>/dev/null; then
+        local updates
+        updates=$(dnf check-update --quiet 2>/dev/null | grep -c "^\S")
+        if [ "${updates:-0}" -gt 0 ]; then
+            print_status "Pending Updates" "WARN" "${updates} package(s) available"
+        else
+            print_status "Pending Updates" "OK" "System up to date"
+        fi
+    fi
+
+    # Active User Sessions
+    local active_users
+    active_users=$(who 2>/dev/null | wc -l)
+    if [ "${active_users:-0}" -gt 0 ]; then
+        local user_list
+        user_list=$(who 2>/dev/null | awk '{printf "%s(%s) ", $1, $5}' | xargs)
+        print_status "Active Sessions" "OK" "${active_users} user(s): ${user_list}"
+    else
+        print_status "Active Sessions" "OK" "No active sessions"
+    fi
+
+    # Needrestart check
+    if command -v needrestart &>/dev/null; then
+        local nr_status
+        nr_status=$(needrestart -b 2>/dev/null | grep "NEEDRESTART-KSTA" | awk '{print $2}')
+        case "$nr_status" in
+            1) print_status "Kernel Restart" "OK" "Running latest kernel" ;;
+            2) print_status "Kernel Restart" "WARN" "ABI-compatible update available" ;;
+            3) print_status "Kernel Restart" "WARN" "Reboot required for new kernel" ;;
+        esac
+    fi
+    echo ""
+}
+
+# --- 8. Logs & System Audit (Live Stream) ---
 check_logs() {
     print_section "LOGS & SYSTEM AUDIT STREAM"
 
@@ -628,7 +1107,10 @@ check_logs() {
     echo ""
 }
 
-# --- ASCII Analog Clock ---
+# ==============================================================================
+# ASCII ANALOG CLOCK
+# ==============================================================================
+
 generate_clock() {
     date '+%H %M %S' | awk '
     function lch(dx, dy,    adx, ady, vdy) {
@@ -655,7 +1137,6 @@ generate_clock() {
                 g[y,x] = " "; t[y,x] = 0
             }
 
-        # Circle outline
         for (i = 0; i < 120; i++) {
             a = i / 120.0 * 2 * pi - pi / 2
             px = int(cx + rx * cos(a) + 0.5)
@@ -665,7 +1146,6 @@ generate_clock() {
             }
         }
 
-        # Tick marks at hour positions (lines only, no numbers)
         for (i = 1; i <= 12; i++) {
             a = i / 12.0 * 2 * pi - pi / 2
             ca = cos(a); sa = sin(a)
@@ -691,7 +1171,6 @@ generate_clock() {
 
         g[cy,cx] = "+"; t[cy,cx] = 6
 
-        # Minute hand
         ma = min / 60.0 * 2 * pi - pi / 2
         mch = lch(cos(ma), sin(ma))
         for (s = 0.1; s <= 0.82; s += 0.01) {
@@ -701,7 +1180,6 @@ generate_clock() {
                 if (t[my,mx] <= 1) { g[my,mx] = mch; t[my,mx] = 5 }
         }
 
-        # Hour hand (overwrites minute)
         ha = (hour + min / 60.0) / 12.0 * 2 * pi - pi / 2
         hch = lch(cos(ha), sin(ha))
         for (s = 0.1; s <= 0.52; s += 0.01) {
@@ -733,6 +1211,8 @@ generate_clock() {
 }
 
 draw_clock_overlay() {
+    [ "$NO_COLOR" = true ] && return
+
     local cols
     cols=$(tput cols 2>/dev/null) || cols=80
     local clock_width=31
@@ -754,7 +1234,177 @@ draw_clock_overlay() {
     done <<< "$clock_output"
 }
 
-# --- Render one full frame into a buffer, then paint in-place ---
+# ==============================================================================
+# JSON OUTPUT
+# ==============================================================================
+
+output_json() {
+    local hostname
+    hostname=$(hostname)
+    local timestamp
+    timestamp=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
+
+    local ram_total ram_used ram_pct
+    ram_total=$(free -m | awk '/^Mem:/{print $2}')
+    ram_used=$(free -m | awk '/^Mem:/{print $3}')
+    ram_total=${ram_total:-1}
+    ram_pct=$(( ram_used * 100 / ram_total ))
+
+    local disk_usage disk_free
+    disk_usage=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
+    disk_usage=${disk_usage:-0}
+    disk_free=$(df -h / | awk 'NR==2 {print $4}')
+
+    local cpu_temp="null"
+    if command -v vcgencmd &>/dev/null; then
+        cpu_temp=$(vcgencmd measure_temp | awk -F'=' '{print $2}' | tr -d "'C")
+    elif [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+        cpu_temp=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp)
+    fi
+
+    local load1 load5 load15
+    if [ -f /proc/loadavg ]; then
+        read -r load1 load5 load15 _ _ < /proc/loadavg
+    fi
+
+    local public_internet="false"
+    ping -c 1 -W 2 1.1.1.1 &>/dev/null && public_internet="true"
+
+    local failed_units
+    failed_units=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
+
+    local main_iface local_ip
+    main_iface=$(ip route 2>/dev/null | grep default | awk '{print $5}' | head -n1)
+    local_ip=$(ip -4 addr show "$main_iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+
+    local pihole_active="false"
+    systemctl is-active --quiet pihole-FTL 2>/dev/null && pihole_active="true"
+
+    local docker_running=0
+    if [ -n "$CONTAINER_ENGINE" ]; then
+        docker_running=$($CONTAINER_ENGINE ps -q 2>/dev/null | wc -l)
+    fi
+
+    cat <<ENDJSON
+{
+  "version": "${VERSION}",
+  "hostname": "${hostname}",
+  "timestamp": "${timestamp}",
+  "hardware": {
+    "cpu_temp_c": ${cpu_temp},
+    "ram_total_mb": ${ram_total},
+    "ram_used_mb": ${ram_used},
+    "ram_percent": ${ram_pct},
+    "load_1m": ${load1:-0},
+    "load_5m": ${load5:-0},
+    "load_15m": ${load15:-0},
+    "failed_systemd_units": ${failed_units}
+  },
+  "storage": {
+    "root_usage_percent": ${disk_usage},
+    "root_free": "${disk_free}"
+  },
+  "network": {
+    "interface": "${main_iface}",
+    "local_ip": "${local_ip}",
+    "public_internet": ${public_internet}
+  },
+  "pihole": {
+    "active": ${pihole_active}
+  },
+  "containers": {
+    "engine": "${CONTAINER_ENGINE:-none}",
+    "running": ${docker_running}
+  }
+}
+ENDJSON
+}
+
+# ==============================================================================
+# WEBHOOK ALERTS
+# ==============================================================================
+
+check_webhook_alerts() {
+    [ -z "$WEBHOOK_URL" ] && return
+
+    local alerts=""
+
+    local ram_pct
+    ram_pct=$(free | awk '/^Mem:/{total=$2; used=$3; if(total>0) printf "%d", used*100/total; else print "0"}')
+    if [ "$ram_pct" -gt "$RAM_LIMIT" ]; then
+        alerts+="RAM usage at ${ram_pct}% (limit: ${RAM_LIMIT}%)\\n"
+    fi
+
+    local disk_pct
+    disk_pct=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
+    disk_pct=${disk_pct:-0}
+    if [ "$disk_pct" -gt "$DISK_LIMIT" ]; then
+        alerts+="Disk usage at ${disk_pct}% (limit: ${DISK_LIMIT}%)\\n"
+    fi
+
+    if command -v vcgencmd &>/dev/null; then
+        local temp
+        temp=$(vcgencmd measure_temp | awk -F'=' '{print $2}' | tr -d "'C")
+        local temp_int=${temp%.*}
+        if [ "${temp_int:-0}" -gt "$TEMP_LIMIT" ]; then
+            alerts+="CPU temp at ${temp}°C (limit: ${TEMP_LIMIT}°C)\\n"
+        fi
+    fi
+
+    if ! touch /tmp/ro_test_check &>/dev/null; then
+        alerts+="CRITICAL: Filesystem is READ-ONLY\\n"
+    else
+        rm -f /tmp/ro_test_check
+    fi
+
+    if [ -n "$alerts" ]; then
+        local payload
+        payload=$(printf '{"text":"⚠️ healthcheck alert on %s:\\n%s","content":"⚠️ healthcheck alert on %s:\\n%s"}' \
+            "$(hostname)" "$alerts" "$(hostname)" "$alerts")
+        if command -v curl &>/dev/null; then
+            curl -s -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL" &>/dev/null &
+        elif command -v wget &>/dev/null; then
+            wget -qO- --post-data="$payload" --header="Content-Type: application/json" "$WEBHOOK_URL" &>/dev/null &
+        fi
+    fi
+}
+
+# ==============================================================================
+# THROUGHPUT STATE UPDATE (must run outside subshell)
+# ==============================================================================
+
+update_throughput_state() {
+    local main_iface
+    main_iface=$(ip route 2>/dev/null | grep default | awk '{print $5}' | head -n1)
+
+    # Network throughput state
+    if [ -n "$main_iface" ] && [ -f /proc/net/dev ]; then
+        local rx tx
+        read -r rx tx <<< "$(awk -v iface="$main_iface" '$0 ~ iface":" {gsub(/.*:/, "", $0); print $1, $9}' /proc/net/dev)"
+        _prev_rx_bytes=${rx:-0}
+        _prev_tx_bytes=${tx:-0}
+        _prev_net_ts=$(date +%s)
+    fi
+
+    # Disk throughput state
+    if [ -f /proc/diskstats ]; then
+        local root_dev
+        root_dev=$(df / | awk 'NR==2 {print $1}' | sed 's|/dev/||; s|[0-9]*$||; s|p$||')
+        if [ -n "$root_dev" ]; then
+            local rs ws
+            rs=$(awk -v dev="$root_dev" '$3==dev {print $6}' /proc/diskstats 2>/dev/null)
+            ws=$(awk -v dev="$root_dev" '$3==dev {print $10}' /proc/diskstats 2>/dev/null)
+            _prev_read_sectors=${rs:-0}
+            _prev_write_sectors=${ws:-0}
+            _prev_disk_ts=$(date +%s)
+        fi
+    fi
+}
+
+# ==============================================================================
+# RENDER
+# ==============================================================================
+
 PREV_COLS=0
 
 render_frame() {
@@ -772,14 +1422,20 @@ render_frame() {
         if [ "$LESS_MODE" = true ]; then
             check_hardware
             [ "$SHOW_CPU" = true ] && check_cpu_info
+            [ "$SHOW_THERMAL" = true ] && check_thermal_expanded
             [ "$PIHOLE_MODE" = true ] && check_pihole_v6
             check_logs
         else
             check_hardware
             [ "$SHOW_CPU" = true ] && check_cpu_info
+            [ "$SHOW_THERMAL" = true ] && check_thermal_expanded
             check_storage
+            [ "$SHOW_STORAGE_PERF" = true ] && check_storage_performance
             [ "$PIHOLE_MODE" = true ] && check_pihole_v6
             check_network_security
+            [ "$SHOW_NETWORK" = true ] && check_network_diagnostics
+            [ "$SHOW_DOCKER" = true ] && check_docker
+            [ "$SHOW_SECURITY" = true ] && check_security_audit
             check_logs
         fi
     )
@@ -788,7 +1444,27 @@ render_frame() {
     echo -e "$buffer"
     tput ed 2>/dev/null
     draw_clock_overlay
+
+    # Update throughput state after display (outside subshell)
+    update_throughput_state
+
+    # Log to file if configured
+    if [ -n "$LOG_FILE" ]; then
+        output_json >> "$LOG_FILE" 2>/dev/null
+    fi
+
+    # Check webhook alerts
+    check_webhook_alerts
 }
+
+# ==============================================================================
+# JSON MODE
+# ==============================================================================
+
+if [ "$JSON_MODE" = true ]; then
+    output_json
+    exit 0
+fi
 
 # --- One-shot mode ---
 if [ "$ONESHOT" = true ]; then
@@ -828,29 +1504,42 @@ while true; do
                     break
                     ;;
                 l|L)
-                    if [ "$LESS_MODE" = true ]; then
-                        LESS_MODE=false
-                    else
-                        LESS_MODE=true
-                    fi
+                    LESS_MODE=$( [ "$LESS_MODE" = true ] && echo false || echo true )
                     clear
                     break
                     ;;
                 c|C)
-                    if [ "$SHOW_CPU" = true ]; then
-                        SHOW_CPU=false
-                    else
-                        SHOW_CPU=true
-                    fi
+                    SHOW_CPU=$( [ "$SHOW_CPU" = true ] && echo false || echo true )
                     clear
                     break
                     ;;
                 p|P)
-                    if [ "$PIHOLE_MODE" = true ]; then
-                        PIHOLE_MODE=false
-                    else
-                        PIHOLE_MODE=true
-                    fi
+                    PIHOLE_MODE=$( [ "$PIHOLE_MODE" = true ] && echo false || echo true )
+                    clear
+                    break
+                    ;;
+                d|D)
+                    SHOW_DOCKER=$( [ "$SHOW_DOCKER" = true ] && echo false || echo true )
+                    clear
+                    break
+                    ;;
+                n|N)
+                    SHOW_NETWORK=$( [ "$SHOW_NETWORK" = true ] && echo false || echo true )
+                    clear
+                    break
+                    ;;
+                s|S)
+                    SHOW_STORAGE_PERF=$( [ "$SHOW_STORAGE_PERF" = true ] && echo false || echo true )
+                    clear
+                    break
+                    ;;
+                t|T)
+                    SHOW_THERMAL=$( [ "$SHOW_THERMAL" = true ] && echo false || echo true )
+                    clear
+                    break
+                    ;;
+                a|A)
+                    SHOW_SECURITY=$( [ "$SHOW_SECURITY" = true ] && echo false || echo true )
                     clear
                     break
                     ;;
