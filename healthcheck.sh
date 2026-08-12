@@ -21,7 +21,7 @@
 #   p            Toggle Pi-hole mode
 # ==============================================================================
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -163,8 +163,157 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
+# --- OS Detection & Logo ---
+OS_ID="linux"
+OS_NAME="Linux"
+OS_COLOR="$YELLOW"
+
+if [ -f /etc/os-release ]; then
+    OS_ID=$(. /etc/os-release && echo "$ID")
+    OS_NAME=$(. /etc/os-release && echo "$PRETTY_NAME")
+fi
+
+case "$OS_ID" in
+    raspbian)                       OS_COLOR="$RED" ;;
+    debian)                         OS_COLOR="$RED" ;;
+    ubuntu|linuxmint|pop)           OS_COLOR="$YELLOW" ;;
+    arch|archarm|manjaro|endeavouros) OS_COLOR="$CYAN" ;;
+    fedora)                         OS_COLOR="$BLUE" ;;
+    centos|rhel|rocky|alma)         OS_COLOR="$PURPLE" ;;
+    alpine)                         OS_COLOR="$BLUE" ;;
+    kali)                           OS_COLOR="$BLUE" ;;
+    gentoo)                         OS_COLOR="$PURPLE" ;;
+    void)                           OS_COLOR="$GREEN" ;;
+    opensuse*|sles)                 OS_COLOR="$GREEN" ;;
+esac
+
+print_os_logo() {
+    local lines=()
+    case "$OS_ID" in
+        raspbian)
+            lines=(
+                "   .~~.   .~~."
+                "  '. \\ ' ' / .'"
+                "   .~ .~~~. ~."
+                "  : .~.'~'.~. :"
+                " ~ (   ) (   ) ~"
+                "( : '~'.~.'~' : )"
+            )
+            ;;
+        debian|kali)
+            lines=(
+                "  _____"
+                " /  __ \\"
+                "|  /    |"
+                "|  \\___-"
+                "-_"
+                "  --_"
+            )
+            ;;
+        ubuntu|pop|linuxmint)
+            lines=(
+                "         _"
+                "     ---(_)"
+                " _/  ---  \\"
+                "(_) |   |"
+                " \\  --- _/"
+                "     ---(_)"
+            )
+            ;;
+        arch|archarm|manjaro|endeavouros)
+            lines=(
+                "      /\\"
+                "     /  \\"
+                "    /\\   \\"
+                "   /  \\   \\"
+                "  /   _\\   \\"
+                " /___/  \\___\\"
+            )
+            ;;
+        fedora)
+            lines=(
+                "      ____"
+                "     /    \\"
+                "    |  f  _|"
+                "    |  |"
+                "    |  |"
+                "     \\_|"
+            )
+            ;;
+        centos|rhel|rocky|alma)
+            lines=(
+                "  \\  |  /"
+                "   \\ | /"
+                "----***----"
+                "   / | \\"
+                "  /  |  \\"
+            )
+            ;;
+        alpine)
+            lines=(
+                "   /\\ /\\"
+                "  /  V  \\"
+                " /      /"
+                "/      /"
+                "\\     /"
+                " \\   /"
+            )
+            ;;
+        gentoo)
+            lines=(
+                " _-----_"
+                "(       \\"
+                "\\    0   \\"
+                " \\        )"
+                " /      _/"
+                "(     _-"
+                "\\____-"
+            )
+            ;;
+        void)
+            lines=(
+                "    _______"
+                "   \\  ___  \\"
+                "    \\ \\  \\ \\"
+                "     \\ \\  \\ \\"
+                "      \\_\\  \\_\\"
+                "             "
+            )
+            ;;
+        opensuse*|sles)
+            lines=(
+                "  _______"
+                "__|   __ \\"
+                "     / .\\ \\"
+                "     \\__/ |"
+                "   ______ |"
+                "  /_____/-'"
+            )
+            ;;
+        *)
+            lines=(
+                "    .---."
+                "   /     \\"
+                "   |O   O|"
+                "   |  >  |"
+                "  /|     |\\"
+                "    '---'"
+            )
+            ;;
+    esac
+
+    local line
+    for line in "${lines[@]}"; do
+        printf '%b%s%b\n' "$OS_COLOR" "  $line" "$NC"
+    done
+    printf '%b  %s%b\n' "$BOLD" "$OS_NAME" "$NC"
+    echo ""
+}
+
 # --- UI Helpers ---
 print_header() {
+    print_os_logo
+
     local mode_label
     if [ "$LESS_MODE" = true ]; then
         mode_label="${YELLOW}LOG-ONLY${NC}"
