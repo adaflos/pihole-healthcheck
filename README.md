@@ -6,6 +6,14 @@ Interactive top-style terminal dashboard for monitoring any Linux system. Suppor
 ![Version](https://img.shields.io/badge/Version-1.2.1-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
+## Screenshots
+
+### System Mode
+![System Health Dashboard](screenshot_system.png)
+
+### Pi-hole Mode
+![Pi-hole Dashboard](screenshot_pihole.png)
+
 ## Features
 
 - **Runs on any Linux distro** — auto-detects OS and displays a colored ASCII logo
