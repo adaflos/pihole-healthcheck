@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Unified Health Check & Visual Dashboard for Pi-hole v6 (Pi Zero 2 W)
+# Unified System & Pi-hole Health Check Dashboard
 # Interactive top-style mode with auto-refresh.
 #
 # Usage:
 #   Full View:         ./healthcheck
+#   Regular Mode:      ./healthcheck -r       (system-only, no Pi-hole)
+#   Pi-hole Mode:      ./healthcheck -p       (force Pi-hole checks)
 #   Log-Only Mode:     ./healthcheck -l
-#   Custom Interval:   ./healthcheck -n 10   (refresh every 10 seconds)
+#   Custom Interval:   ./healthcheck -n 10    (refresh every 10 seconds)
 #   One-Shot Mode:     ./healthcheck -1       (run once and exit)
 #   Self-Update:       ./healthcheck -u
 #
@@ -16,9 +18,10 @@
 #   r            Force immediate refresh
 #   l            Toggle log-only mode
 #   c            Toggle CPU info panel
+#   p            Toggle Pi-hole mode
 # ==============================================================================
 
-VERSION="1.0.3"
+VERSION="1.1.0"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -27,6 +30,13 @@ LESS_MODE=false
 REFRESH=1
 ONESHOT=false
 SHOW_CPU=false
+
+# Auto-detect Pi-hole: default to pihole mode only if pihole-FTL exists
+if command -v pihole &>/dev/null || systemctl list-unit-files pihole-FTL.service &>/dev/null 2>&1; then
+    PIHOLE_MODE=true
+else
+    PIHOLE_MODE=false
+fi
 
 # --- Self-Update ---
 do_update() {
@@ -99,6 +109,14 @@ while [[ $# -gt 0 ]]; do
             ONESHOT=true
             shift
             ;;
+        -r|--regular)
+            PIHOLE_MODE=false
+            shift
+            ;;
+        -p|--pihole)
+            PIHOLE_MODE=true
+            shift
+            ;;
         -u|--update)
             do_update
             ;;
@@ -107,10 +125,16 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -h|--help)
-            echo "Usage: healthcheck [-l|--less] [-n SECONDS] [-1|--once] [-u|--update] [-v|--version]"
+            echo "Usage: healthcheck [-r|--regular] [-p|--pihole] [-l|--less] [-n SECONDS] [-1|--once] [-u|--update] [-v|--version]"
+            echo ""
+            echo "Modes:"
+            echo "  -r, --regular     System-only mode (no Pi-hole checks)"
+            echo "  -p, --pihole      Force Pi-hole mode (auto-detected by default)"
             echo "  -l, --less        Log-only mode (minimal vitals + logs)"
-            echo "  -n, --interval N  Refresh every N seconds (default: 1)"
             echo "  -1, --once        Run once and exit (no interactive loop)"
+            echo ""
+            echo "Options:"
+            echo "  -n, --interval N  Refresh every N seconds (default: 1)"
             echo "  -u, --update      Check for updates and install to ${INSTALL_PATH}"
             echo "  -v, --version     Show version and exit"
             echo ""
@@ -119,6 +143,7 @@ while [[ $# -gt 0 ]]; do
             echo "  r            Force immediate refresh"
             echo "  l            Toggle log-only mode"
             echo "  c            Toggle CPU info panel"
+            echo "  p            Toggle Pi-hole mode"
             exit 0
             ;;
         *)
@@ -148,15 +173,27 @@ print_header() {
     fi
 
     if [ "$LESS_MODE" = true ]; then
+        local log_title
+        if [ "$PIHOLE_MODE" = true ]; then
+            log_title="🍓 LIVE LOG & EVENT MONITOR (Pi-hole v6)"
+        else
+            log_title="📋 LIVE LOG & EVENT MONITOR"
+        fi
         echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────────────────┐${NC}"
-        printf "${CYAN}│${NC} ${BOLD}${PURPLE}  🍓 LIVE LOG & EVENT MONITOR (Pi-hole v6) ${NC}              ${DIM}v%-12s${NC}${CYAN}│${NC}\n" "$VERSION"
+        printf "${CYAN}│${NC} ${BOLD}${PURPLE}  %-43s${NC}              ${DIM}v%-12s${NC}${CYAN}│${NC}\n" "$log_title" "$VERSION"
         echo -e "${CYAN}├──────────────────────────────────────────────────────────────────────────────┤${NC}"
         printf "${CYAN}│${NC} ${BOLD}Host:${NC} %-12s ${BOLD}Time:${NC} %-25s ${BOLD}Load:${NC} %-15s ${CYAN}│${NC}\n" \
             "$(hostname)" "$(date '+%Y-%m-%d %H:%M:%S')" "$(uptime | awk -F'load average:' '{print $2}' | xargs)"
         echo -e "${CYAN}└──────────────────────────────────────────────────────────────────────────────┘${NC}"
     else
+        local dash_title
+        if [ "$PIHOLE_MODE" = true ]; then
+            dash_title="🍓 PI-HOLE v6 & SYSTEM DASHBOARD"
+        else
+            dash_title="🖥  SYSTEM HEALTH DASHBOARD"
+        fi
         echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────────────────┐${NC}"
-        printf "${CYAN}│${NC} ${BOLD}${PURPLE}  🍓 PI-HOLE v6 & PI ZERO 2 W DASHBOARD ${NC}               ${DIM}v%-12s${NC}${CYAN}│${NC}\n" "$VERSION"
+        printf "${CYAN}│${NC} ${BOLD}${PURPLE}  %-43s${NC}              ${DIM}v%-12s${NC}${CYAN}│${NC}\n" "$dash_title" "$VERSION"
         echo -e "${CYAN}├──────────────────────────────────────────────────────────────────────────────┤${NC}"
         printf "${CYAN}│${NC} ${BOLD}Host:${NC} %-12s ${BOLD}OS:${NC} %-18s ${BOLD}Uptime:${NC} %-17s ${CYAN}│${NC}\n" \
             "$(hostname)" "$(uname -s) $(uname -r | cut -d'-' -f1)" "$(uptime -p | sed 's/up //')"
@@ -164,7 +201,13 @@ print_header() {
             "$(date '+%Y-%m-%d %H:%M:%S')" "$(uptime | awk -F'load average:' '{print $2}' | xargs)"
         echo -e "${CYAN}└──────────────────────────────────────────────────────────────────────────────┘${NC}"
     fi
-    echo -e " ${DIM}Mode: ${NC}${mode_label}  ${DIM}│  Refresh: ${NC}${REFRESH}s  ${DIM}│  Keys: ${NC}${BOLD}q${NC}${DIM}uit  ${NC}${BOLD}r${NC}${DIM}efresh  ${NC}${BOLD}l${NC}${DIM}og-toggle  ${NC}${BOLD}c${NC}${DIM}pu-info${NC}"
+    local pihole_label
+    if [ "$PIHOLE_MODE" = true ]; then
+        pihole_label="${PURPLE}PIHOLE${NC}"
+    else
+        pihole_label="${CYAN}SYSTEM${NC}"
+    fi
+    echo -e " ${DIM}View: ${NC}${mode_label}  ${DIM}│  Scope: ${NC}${pihole_label}  ${DIM}│  Refresh: ${NC}${REFRESH}s  ${DIM}│  ${NC}${BOLD}q${NC}${DIM}uit ${NC}${BOLD}r${NC}${DIM}efresh ${NC}${BOLD}l${NC}${DIM}og ${NC}${BOLD}c${NC}${DIM}pu ${NC}${BOLD}p${NC}${DIM}ihole${NC}"
     echo ""
 }
 
@@ -392,14 +435,16 @@ check_logs() {
         print_status "System Errors (1h)" "OK" "No critical errors"
     fi
 
-    ftl_logs=$(journalctl -u pihole-FTL -p 0..4 --since "2 hours ago" --no-pager -n 5 2>/dev/null | tail -n 5)
-    if [ -n "$ftl_logs" ]; then
-        print_status "FTL Log Events (2h)" "WARN" "Recent entries:"
-        echo "$ftl_logs" | while read -r line; do
-            echo -e "      ${DIM}${line}${NC}"
-        done
-    else
-        print_status "FTL Log Events (2h)" "OK" "Clean (No events in last 2h)"
+    if [ "$PIHOLE_MODE" = true ]; then
+        ftl_logs=$(journalctl -u pihole-FTL -p 0..4 --since "2 hours ago" --no-pager -n 5 2>/dev/null | tail -n 5)
+        if [ -n "$ftl_logs" ]; then
+            print_status "FTL Log Events (2h)" "WARN" "Recent entries:"
+            echo "$ftl_logs" | while read -r line; do
+                echo -e "      ${DIM}${line}${NC}"
+            done
+        else
+            print_status "FTL Log Events (2h)" "OK" "Clean (No events in last 2h)"
+        fi
     fi
 
     if dmesg 2>/dev/null | grep -iqE "Out of memory|Killed process"; then
@@ -416,7 +461,7 @@ check_logs() {
         print_status "Failed SSH Logins" "OK" "0 failed attempts today"
     fi
 
-    if [ -f /var/log/pihole/pihole.log ]; then
+    if [ "$PIHOLE_MODE" = true ] && [ -f /var/log/pihole/pihole.log ]; then
         last_queries=$(tail -n 5 /var/log/pihole/pihole.log 2>/dev/null | grep -E 'query|reply')
         if [ -n "$last_queries" ]; then
             print_status "Live DNS Traffic" "OK" "Recent queries:"
@@ -572,13 +617,13 @@ render_frame() {
         if [ "$LESS_MODE" = true ]; then
             check_hardware
             [ "$SHOW_CPU" = true ] && check_cpu_info
-            check_pihole_v6
+            [ "$PIHOLE_MODE" = true ] && check_pihole_v6
             check_logs
         else
             check_hardware
             [ "$SHOW_CPU" = true ] && check_cpu_info
             check_storage
-            check_pihole_v6
+            [ "$PIHOLE_MODE" = true ] && check_pihole_v6
             check_network_security
             check_logs
         fi
@@ -641,6 +686,15 @@ while true; do
                         SHOW_CPU=false
                     else
                         SHOW_CPU=true
+                    fi
+                    clear
+                    break
+                    ;;
+                p|P)
+                    if [ "$PIHOLE_MODE" = true ]; then
+                        PIHOLE_MODE=false
+                    else
+                        PIHOLE_MODE=true
                     fi
                     clear
                     break
