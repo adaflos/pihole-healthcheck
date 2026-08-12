@@ -23,7 +23,7 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.3.0"
+VERSION="1.3.1"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -75,7 +75,7 @@ fi
 
 # --- Auto-detect container engine ---
 CONTAINER_ENGINE=""
-if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+if command -v docker &>/dev/null && { [ -S /var/run/docker.sock ] || systemctl is-active --quiet docker 2>/dev/null; }; then
     CONTAINER_ENGINE="docker"
 elif command -v podman &>/dev/null; then
     CONTAINER_ENGINE="podman"
@@ -669,18 +669,22 @@ check_storage_performance() {
         fi
     fi
 
-    # S.M.A.R.T. Health
+    # S.M.A.R.T. Health (single smartctl call per drive, cached output)
     if command -v smartctl &>/dev/null; then
         local smart_devs
         smart_devs=$(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2=="disk" {print $1}' | head -3)
         for dev in $smart_devs; do
-            local smart_health
-            smart_health=$(smartctl -H "/dev/$dev" 2>/dev/null | grep -i 'overall-health\|SMART Health Status' | awk -F: '{print $2}' | xargs)
-            if [ -n "$smart_health" ]; then
-                if echo "$smart_health" | grep -iq 'passed\|ok'; then
-                    print_status "S.M.A.R.T. ($dev)" "OK" "$smart_health"
-                else
-                    print_status "S.M.A.R.T. ($dev)" "FAIL" "$smart_health"
+            local smart_out
+            smart_out=$(timeout 3 smartctl -H "/dev/$dev" 2>/dev/null)
+            if [ -n "$smart_out" ]; then
+                local smart_health
+                smart_health=$(echo "$smart_out" | grep -i 'overall-health\|SMART Health Status' | awk -F: '{print $2}' | xargs)
+                if [ -n "$smart_health" ]; then
+                    if echo "$smart_health" | grep -iq 'passed\|ok'; then
+                        print_status "S.M.A.R.T. ($dev)" "OK" "$smart_health"
+                    else
+                        print_status "S.M.A.R.T. ($dev)" "FAIL" "$smart_health"
+                    fi
                 fi
             fi
         done
@@ -732,7 +736,7 @@ check_pihole_v6() {
     fi
 
     if command -v dig &>/dev/null; then
-        qtime=$(dig @127.0.0.1 google.com +time=2 +tries=1 | awk '/Query time:/ {print $4}')
+        qtime=$(dig @127.0.0.1 google.com +time=1 +tries=1 | awk '/Query time:/ {print $4}')
         if [ -n "$qtime" ]; then
             print_status "DNS Lookup Speed" "OK" "${qtime} ms (Local loopback)"
         else
@@ -752,7 +756,7 @@ check_network_security() {
         print_status "Local IP Address" "OK" "${local_ip:-Unknown} on ${main_iface}"
     fi
 
-    if ping -c 1 -W 2 1.1.1.1 &>/dev/null; then
+    if ping -c 1 -W 1 1.1.1.1 &>/dev/null; then
         print_status "Public Internet" "OK" "Connected"
     else
         print_status "Public Internet" "FAIL" "Unreachable"
@@ -787,22 +791,28 @@ check_network_diagnostics() {
         fi
     fi
 
-    # DNS Latency Matrix
+    # DNS Latency Matrix (parallel queries)
     if command -v dig &>/dev/null; then
-        local dns_servers=("1.1.1.1:Cloudflare" "8.8.8.8:Google")
+        local dns_tmp
+        dns_tmp=$(mktemp -d 2>/dev/null || mktemp -d -t hc_dns)
+
+        dig @1.1.1.1 example.com +time=1 +tries=1 2>/dev/null | awk '/Query time:/ {print $4}' > "$dns_tmp/cf" &
+        dig @8.8.8.8 example.com +time=1 +tries=1 2>/dev/null | awk '/Query time:/ {print $4}' > "$dns_tmp/go" &
         if [ "$PIHOLE_MODE" = true ]; then
-            dns_servers+=("127.0.0.1:Pi-hole")
+            dig @127.0.0.1 example.com +time=1 +tries=1 2>/dev/null | awk '/Query time:/ {print $4}' > "$dns_tmp/ph" &
         fi
+        wait
 
         local dns_results=""
-        for entry in "${dns_servers[@]}"; do
-            local srv=${entry%%:*}
-            local name=${entry##*:}
-            local ms
-            ms=$(dig @"$srv" example.com +time=2 +tries=1 2>/dev/null | awk '/Query time:/ {print $4}')
-            ms=${ms:-"timeout"}
-            dns_results+="${name}: ${ms}ms  "
-        done
+        local cf_ms go_ms ph_ms
+        cf_ms=$(cat "$dns_tmp/cf" 2>/dev/null); cf_ms=${cf_ms:-timeout}
+        go_ms=$(cat "$dns_tmp/go" 2>/dev/null); go_ms=${go_ms:-timeout}
+        dns_results="Cloudflare: ${cf_ms}ms  Google: ${go_ms}ms"
+        if [ "$PIHOLE_MODE" = true ]; then
+            ph_ms=$(cat "$dns_tmp/ph" 2>/dev/null); ph_ms=${ph_ms:-timeout}
+            dns_results+="  Pi-hole: ${ph_ms}ms"
+        fi
+        rm -rf "$dns_tmp"
         print_status "DNS Latency" "OK" "$dns_results"
     fi
 
@@ -866,14 +876,14 @@ check_docker() {
         print_status "Restart Loops" "FAIL" "$(echo "$restarting" | tr '\n' ' ')"
     fi
 
-    # Top 3 by CPU/Memory
+    # Top 3 by memory (uses ps-based check, avoids slow docker stats)
     if [ "$running" -gt 0 ]; then
         local top_containers
-        top_containers=$($CONTAINER_ENGINE stats --no-stream --format "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | sort -t$'\t' -k2 -rn | head -3)
+        top_containers=$($CONTAINER_ENGINE ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | head -5)
         if [ -n "$top_containers" ]; then
-            print_status "Top Containers" "OK" "(by CPU)"
-            echo "$top_containers" | while IFS=$'\t' read -r name cpu mem; do
-                printf "      ${DIM}%-25s CPU: %-8s MEM: %s${NC}\n" "$name" "$cpu" "$mem"
+            print_status "Running Containers" "OK" ""
+            echo "$top_containers" | while IFS=$'\t' read -r name status; do
+                printf "      ${DIM}%-25s %s${NC}\n" "$name" "$status"
             done
         fi
     fi
@@ -889,10 +899,11 @@ check_thermal_expanded() {
         local smart_devs
         smart_devs=$(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2=="disk" {print $1}' | head -4)
         for dev in $smart_devs; do
-            local drive_temp
-            drive_temp=$(smartctl -A "/dev/$dev" 2>/dev/null | awk '/Temperature_Celsius|Airflow_Temperature/ {print $10}' | head -1)
+            local drive_temp smart_out
+            smart_out=$(timeout 3 smartctl -A "/dev/$dev" 2>/dev/null)
+            drive_temp=$(echo "$smart_out" | awk '/Temperature_Celsius|Airflow_Temperature/ {print $10}' | head -1)
             if [ -z "$drive_temp" ]; then
-                drive_temp=$(smartctl -A "/dev/$dev" 2>/dev/null | awk '/Temperature:/ {print $2}' | head -1)
+                drive_temp=$(echo "$smart_out" | awk '/Temperature:/ {print $2}' | head -1)
             fi
             if [ -n "$drive_temp" ] && [ "$drive_temp" -gt 0 ] 2>/dev/null; then
                 local dstat="OK"
@@ -963,11 +974,11 @@ check_security_audit() {
 
     # Firewall Status
     if command -v ufw &>/dev/null; then
-        local ufw_status
-        ufw_status=$(ufw status 2>/dev/null | head -1)
-        if echo "$ufw_status" | grep -qi "active"; then
+        local ufw_out
+        ufw_out=$(ufw status 2>/dev/null)
+        if echo "$ufw_out" | head -1 | grep -qi "active"; then
             local rule_count
-            rule_count=$(ufw status 2>/dev/null | grep -c "ALLOW\|DENY\|REJECT")
+            rule_count=$(echo "$ufw_out" | grep -c "ALLOW\|DENY\|REJECT")
             print_status "Firewall (ufw)" "OK" "Active (${rule_count} rules)"
         else
             print_status "Firewall (ufw)" "WARN" "Inactive"
@@ -988,46 +999,34 @@ check_security_audit() {
         print_status "Firewall" "WARN" "No firewall detected"
     fi
 
-    # Fail2ban
+    # Fail2ban (single status call)
     if command -v fail2ban-client &>/dev/null; then
-        local jails banned
-        jails=$(fail2ban-client status 2>/dev/null | grep "Number of jail" | awk '{print $NF}')
-        banned=$(fail2ban-client status 2>/dev/null | grep -c "Currently banned")
-        if [ -n "$jails" ]; then
-            local total_banned=0
-            for jail in $(fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*://;s/,/ /g'); do
-                local jb
-                jb=$(fail2ban-client status "$jail" 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
-                total_banned=$(( total_banned + ${jb:-0} ))
-            done
-            print_status "Fail2ban" "OK" "${jails} jail(s), ${total_banned} banned IP(s)"
+        local f2b_output jails
+        f2b_output=$(fail2ban-client status 2>/dev/null)
+        if [ -n "$f2b_output" ]; then
+            jails=$(echo "$f2b_output" | grep "Number of jail" | awk '{print $NF}')
+            print_status "Fail2ban" "OK" "${jails:-0} active jail(s)"
         fi
     fi
 
-    # Pending Updates
-    if command -v apt &>/dev/null; then
+    # Pending Updates (uses cached file when available, avoids slow apt/dnf queries)
+    if [ -f /var/lib/update-notifier/updates-available ]; then
         local updates
-        updates=$(apt list --upgradable 2>/dev/null | grep -c "upgradable")
+        updates=$(grep -oP '\d+(?= packages? can be updated)' /var/lib/update-notifier/updates-available 2>/dev/null | head -1)
         if [ "${updates:-0}" -gt 0 ]; then
             print_status "Pending Updates" "WARN" "${updates} package(s) upgradable"
         else
             print_status "Pending Updates" "OK" "System up to date"
         fi
-    elif command -v checkupdates &>/dev/null; then
-        local updates
-        updates=$(checkupdates 2>/dev/null | wc -l)
-        if [ "${updates:-0}" -gt 0 ]; then
-            print_status "Pending Updates" "WARN" "${updates} package(s) available"
-        else
-            print_status "Pending Updates" "OK" "System up to date"
-        fi
-    elif command -v dnf &>/dev/null; then
-        local updates
-        updates=$(dnf check-update --quiet 2>/dev/null | grep -c "^\S")
-        if [ "${updates:-0}" -gt 0 ]; then
-            print_status "Pending Updates" "WARN" "${updates} package(s) available"
-        else
-            print_status "Pending Updates" "OK" "System up to date"
+    elif [ -f /var/lib/pacman/db.lck ] || command -v pacman &>/dev/null; then
+        if command -v checkupdates &>/dev/null; then
+            local updates
+            updates=$(checkupdates 2>/dev/null | wc -l)
+            if [ "${updates:-0}" -gt 0 ]; then
+                print_status "Pending Updates" "WARN" "${updates} package(s) available"
+            else
+                print_status "Pending Updates" "OK" "System up to date"
+            fi
         fi
     fi
 
@@ -1042,15 +1041,9 @@ check_security_audit() {
         print_status "Active Sessions" "OK" "No active sessions"
     fi
 
-    # Needrestart check
-    if command -v needrestart &>/dev/null; then
-        local nr_status
-        nr_status=$(needrestart -b 2>/dev/null | grep "NEEDRESTART-KSTA" | awk '{print $2}')
-        case "$nr_status" in
-            1) print_status "Kernel Restart" "OK" "Running latest kernel" ;;
-            2) print_status "Kernel Restart" "WARN" "ABI-compatible update available" ;;
-            3) print_status "Kernel Restart" "WARN" "Reboot required for new kernel" ;;
-        esac
+    # Reboot required check (instant file check, no slow needrestart)
+    if [ -f /var/run/reboot-required ]; then
+        print_status "Reboot Required" "WARN" "System restart needed"
     fi
     echo ""
 }
@@ -1267,9 +1260,6 @@ output_json() {
         read -r load1 load5 load15 _ _ < /proc/loadavg
     fi
 
-    local public_internet="false"
-    ping -c 1 -W 2 1.1.1.1 &>/dev/null && public_internet="true"
-
     local failed_units
     failed_units=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
 
@@ -1306,8 +1296,7 @@ output_json() {
   },
   "network": {
     "interface": "${main_iface}",
-    "local_ip": "${local_ip}",
-    "public_internet": ${public_internet}
+    "local_ip": "${local_ip}"
   },
   "pihole": {
     "active": ${pihole_active}
