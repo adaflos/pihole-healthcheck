@@ -21,9 +21,20 @@
 #   p            Toggle Pi-hole mode
 # ==============================================================================
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
+
+# --- Color & Formatting Definitions (needed early for do_update) ---
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
 
 # --- Defaults ---
 LESS_MODE=false
@@ -32,7 +43,7 @@ ONESHOT=false
 SHOW_CPU=false
 
 # Auto-detect Pi-hole: default to pihole mode only if pihole-FTL exists
-if command -v pihole &>/dev/null || systemctl list-unit-files pihole-FTL.service &>/dev/null 2>&1; then
+if command -v pihole &>/dev/null || systemctl list-unit-files pihole-FTL.service &>/dev/null; then
     PIHOLE_MODE=true
 else
     PIHOLE_MODE=false
@@ -102,6 +113,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -n|--interval)
+            if [ -z "$2" ] || [[ "$2" == -* ]]; then
+                echo "Error: -n requires a numeric argument"
+                exit 1
+            fi
             REFRESH="$2"
             shift 2
             ;;
@@ -151,17 +166,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-# --- Color & Formatting Definitions ---
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-BOLD='\033[1m'
-DIM='\033[2m'
-NC='\033[0m'
 
 # --- OS Detection & Logo ---
 OS_ID="linux"
@@ -405,6 +409,7 @@ check_hardware() {
         temp_raw=$(vcgencmd measure_temp | awk -F'=' '{print $2}' | tr -d "'C")
         temp_int=${temp_raw%.*}
         freq_raw=$(vcgencmd measure_clock arm | awk -F'=' '{print $2}')
+        freq_raw=${freq_raw:-0}
         freq_mhz=$(( freq_raw / 1000000 ))
 
         if [ "$temp_int" -lt 68 ]; then
@@ -505,6 +510,7 @@ check_storage() {
     print_section "STORAGE & FILESYSTEM MOUNTS"
 
     disk_usage=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
+    disk_usage=${disk_usage:-0}
     disk_free=$(df -h / | awk 'NR==2 {print $4}')
     disk_bar=$(draw_progress_bar "$disk_usage")
 
@@ -534,7 +540,7 @@ check_pihole_v6() {
     print_section "PI-HOLE v6 ENGINE & SERVICES"
 
     if systemctl is-active --quiet pihole-FTL; then
-        ftl_mem=$(ps aux | grep '[p]ihole-FTL' | awk '{print $6}')
+        ftl_mem=$(ps aux | grep '[p]ihole-FTL' | awk '{sum+=$6} END{print sum+0}')
         ftl_mem_mb=$(( ftl_mem / 1024 ))
         print_status "pihole-FTL Engine" "OK" "Active (${ftl_mem_mb}MB RAM usage)"
     else
@@ -793,10 +799,10 @@ fi
 
 # --- Interactive loop ---
 tput civis 2>/dev/null
-clear
 
 # Use alternate screen buffer so the original terminal is restored on exit
 tput smcup 2>/dev/null
+clear
 ALTSCREEN=true
 
 cleanup() {
