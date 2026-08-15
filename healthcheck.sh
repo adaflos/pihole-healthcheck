@@ -23,7 +23,7 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.3.1"
+VERSION="1.3.2"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -599,16 +599,25 @@ check_cpu_info() {
 check_storage() {
     print_section "STORAGE & FILESYSTEM MOUNTS"
 
-    disk_usage=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
-    disk_usage=${disk_usage:-0}
-    disk_free=$(df -h / | awk 'NR==2 {print $4}')
-    disk_bar=$(draw_progress_bar "$disk_usage")
+    while IFS= read -r line; do
+        local mount dev size used avail pct
+        dev=$(echo "$line" | awk '{print $1}')
+        size=$(echo "$line" | awk '{print $2}')
+        used=$(echo "$line" | awk '{print $3}')
+        avail=$(echo "$line" | awk '{print $4}')
+        pct=$(echo "$line" | awk '{print $5}' | tr -d '%')
+        mount=$(echo "$line" | awk '{print $6}')
+        pct=${pct:-0}
 
-    if [ "$disk_usage" -lt "$DISK_LIMIT" ]; then
-        print_status "Total Root Space (/)" "OK" "${disk_free} free ${disk_bar}"
-    else
-        print_status "Total Root Space (/)" "WARN" "${disk_free} free ${disk_bar}"
-    fi
+        local bar status
+        bar=$(draw_progress_bar "$pct")
+        if [ "$pct" -lt "$DISK_LIMIT" ]; then
+            status="OK"
+        else
+            status="WARN"
+        fi
+        print_status "${mount}" "$status" "${avail} free / ${size} ${bar}  ${DIM}(${dev})${NC}"
+    done < <(df -h -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null | awk 'NR>1')
 
     if touch /tmp/ro_test_check &>/dev/null; then
         rm -f /tmp/ro_test_check
