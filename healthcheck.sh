@@ -23,7 +23,7 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.4.0"
+VERSION="1.5.0"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -432,12 +432,119 @@ box_title_row() {
         "$pad" '' "$DIM" "$vlabel" "$NC" "$CYAN" "$NC"
 }
 
+# Does ${#str} count bytes rather than characters? True under a non-UTF-8
+# locale (C/POSIX), which is the default on minimal Pi OS / Debian installs.
+# Probed once at startup rather than assumed.
+if [ ${#_MB_PROBE} -eq 0 ]; then _MB_PROBE="●"; fi
+if [ ${#_MB_PROBE} -eq 1 ]; then _MB_BYTES=false; else _MB_BYTES=true; fi
+
+# Visible length of a string, ignoring ANSI SGR sequences.
+# Writes to the global _vislen instead of echoing, so callers avoid a fork
+# on every line — this runs hundreds of times per frame.
+_vislen=0
+vis_len() {
+    local s="$1" pre rest
+    while [[ "$s" == *$'\033['* ]]; do
+        pre="${s%%$'\033['*}"
+        rest="${s#*$'\033['}"
+        rest="${rest#*m}"
+        s="${pre}${rest}"
+    done
+    # In byte-counting mode, drop UTF-8 continuation bytes (0x80-0xBF). What
+    # remains is exactly one byte per character, so ${#s} becomes the column
+    # count. Every glyph this script draws is single-width.
+    if [ "$_MB_BYTES" = true ]; then
+        s="${s//[$'\x80'-$'\xbf']/}"
+    fi
+    _vislen=${#s}
+}
+
+# Wrap pre-rendered content in a titled box exactly w columns wide.
+#   ╭─ TITLE ──────────╮
+#   │ content          │
+#   ╰──────────────────╯
+box_wrap() {
+    local title="$1" content="$2" w="$3"
+    local inner=$(( w - 3 ))
+    local tfill=$(( w - 5 - ${#title} ))
+    [ "$tfill" -lt 0 ] && tfill=0
+
+    printf '%b╭─ %b%s%b %b%s╮%b\n' \
+        "$CYAN" "${BOLD}${BLUE}" "$title" "$NC" \
+        "$CYAN" "$(repeat_char '─' "$tfill")" "$NC"
+
+    local line pad
+    while IFS= read -r line; do
+        vis_len "$line"
+        pad=$(( inner - _vislen ))
+        [ "$pad" -lt 0 ] && pad=0
+        printf '%b│%b %s%*s%b│%b\n' "$CYAN" "$NC" "$line" "$pad" '' "$CYAN" "$NC"
+    done <<< "$content"
+
+    printf '%b╰%s╯%b\n' "$CYAN" "$(repeat_char '─' $(( w - 2 )))" "$NC"
+}
+
+# Run a check function inside a box, sizing its content to the panel.
+panel() {
+    local title="$1" fn="$2" w="$3"
+    local content
+    content=$( CONTENT_WIDTH=$(( w - 3 )); "$fn" )
+    box_wrap "$title" "$content" "$w"
+}
+
+# The analog clock as a boxed panel, art centred in the available width.
+clock_panel() {
+    local w="$1"
+    local inner=$(( w - 3 ))
+    local content
+    content=$(
+        local line left
+        while IFS= read -r line; do
+            vis_len "$line"
+            left=$(( (inner - _vislen) / 2 ))
+            [ "$left" -lt 0 ] && left=0
+            printf '%*s%s\n' "$left" '' "$line"
+        done <<< "$(generate_clock)"
+    )
+    box_wrap "CLOCK" "$content" "$w"
+}
+
+# Print two pre-rendered column buffers side by side.
+# The left column is padded to lw so the right column stays aligned even
+# once the shorter column has run out of lines.
+compose_columns() {
+    local left="$1" right="$2" lw="$3"
+    local -a L R
+    mapfile -t L <<< "$left"
+    mapfile -t R <<< "$right"
+
+    local n=${#L[@]}
+    [ "${#R[@]}" -gt "$n" ] && n=${#R[@]}
+
+    local i l r pad
+    for ((i = 0; i < n; i++)); do
+        l="${L[i]-}"
+        r="${R[i]-}"
+        # Nothing to the right: emit the left cell alone rather than trailing
+        # padding. \033[K in the paint loop clears the rest of the row.
+        if [ -z "$r" ]; then
+            printf '%s\n' "$l"
+            continue
+        fi
+        vis_len "$l"
+        pad=$(( lw - _vislen ))
+        [ "$pad" -lt 0 ] && pad=0
+        printf '%s%*s %s\n' "$l" "$pad" '' "$r"
+    done
+}
+
 # Pad a string to N display columns.
-# Uses ${#s} (character count) rather than printf's %-*s, which pads by BYTES
-# and so misaligns any cell containing multi-byte UTF-8.
+# Measures with vis_len rather than printf's %-*s, which pads by BYTES and so
+# misaligns any cell containing multi-byte UTF-8.
 pad_to() {
     local s="$1" w="$2"
-    local n=$(( w - ${#s} ))
+    vis_len "$s"
+    local n=$(( w - _vislen ))
     [ "$n" -gt 0 ] && s+=$(printf '%*s' "$n" '')
     printf '%s' "$s"
 }
@@ -563,9 +670,15 @@ print_status() {
         FAIL) icon="✖"; color="$RED"    ;;
         *)    icon="·"; color="$DIM"    ;;
     esac
-    [ "${#label}" -gt 21 ] && label="${label:0:20}…"
-    printf '  %b%s%b %b%s%b %b\n' \
-        "$color" "$icon" "$NC" "$BOLD" "$(pad_to "$label" 21)" "$NC" "$detail"
+    vis_len "$label"
+    if [ "$_vislen" -gt 21 ]; then
+        label="${label:0:20}…"
+        vis_len "$label"
+    fi
+    local lpad=$(( 21 - _vislen ))
+    [ "$lpad" -lt 0 ] && lpad=0
+    printf '  %b%s%b %b%s%*s%b %b\n' \
+        "$color" "$icon" "$NC" "$BOLD" "$label" "$lpad" '' "$NC" "$detail"
 }
 
 # Print an indented detail line, hard-truncated so it can never wrap.
@@ -617,7 +730,6 @@ draw_progress_bar() {
 
 # --- 1. Hardware & Thermal Engine ---
 check_hardware() {
-    print_section "HARDWARE & THERMAL METRICS"
 
     if command -v vcgencmd &>/dev/null; then
         temp_raw=$(vcgencmd measure_temp | awk -F'=' '{print $2}' | tr -d "'C")
@@ -694,7 +806,6 @@ check_hardware() {
 
 # --- 1b. CPU Info Panel (toggled with 'c') ---
 check_cpu_info() {
-    print_section "CPU INFORMATION"
 
     if [ -f /proc/cpuinfo ]; then
         local model cores
@@ -750,7 +861,6 @@ check_cpu_info() {
 
 # --- 2. Storage & Filesystem Health ---
 check_storage() {
-    print_section "STORAGE & FILESYSTEM MOUNTS"
 
     while IFS= read -r line; do
         local mount dev size used avail pct
@@ -789,7 +899,6 @@ check_storage() {
 
 # --- 2b. Storage Performance (toggled with 's') ---
 check_storage_performance() {
-    print_section "STORAGE PERFORMANCE & ARRAYS"
 
     # I/O Wait
     if [ -f /proc/stat ]; then
@@ -887,7 +996,6 @@ check_storage_performance() {
 
 # --- 3. Pi-hole v6 Engine & Web API ---
 check_pihole_v6() {
-    print_section "PI-HOLE v6 ENGINE & SERVICES"
 
     if systemctl is-active --quiet pihole-FTL; then
         ftl_mem=$(ps aux | grep '[p]ihole-FTL' | awk '{sum+=$6} END{print sum+0}')
@@ -910,7 +1018,6 @@ check_pihole_v6() {
 
 # --- 4. Network & Security Details ---
 check_network_security() {
-    print_section "NETWORK CONFIGURATION & SECURITY"
 
     main_iface=$(ip route | grep default | awk '{print $5}' | head -n1)
     if [ -n "$main_iface" ]; then
@@ -928,7 +1035,6 @@ check_network_security() {
 
 # --- 4b. Network Diagnostics (toggled with 'n') ---
 check_network_diagnostics() {
-    print_section "NETWORK & PORT DIAGNOSTICS"
 
     # Active Connections Summary
     if command -v ss &>/dev/null; then
@@ -1014,7 +1120,6 @@ check_network_diagnostics() {
 
 # --- 5. Docker / Container Health (toggled with 'd') ---
 check_docker() {
-    print_section "DOCKER & CONTAINER HEALTH"
 
     if [ -z "$CONTAINER_ENGINE" ]; then
         print_status "Container Engine" "WARN" "No Docker or Podman detected"
@@ -1056,7 +1161,6 @@ check_docker() {
 
 # --- 6. Thermal & Hardware Sensors (toggled with 't') ---
 check_thermal_expanded() {
-    print_section "THERMAL & HARDWARE SENSORS"
 
     # Drive Temperatures
     if command -v smartctl &>/dev/null; then
@@ -1134,7 +1238,6 @@ check_thermal_expanded() {
 
 # --- 7. Security & System Audit (toggled with 'a') ---
 check_security_audit() {
-    print_section "SECURITY & SYSTEM AUDIT"
 
     # Firewall Status
     if command -v ufw &>/dev/null; then
@@ -1214,7 +1317,6 @@ check_security_audit() {
 
 # --- 8. Logs & System Audit (Live Stream) ---
 check_logs() {
-    print_section "LOGS & SYSTEM AUDIT STREAM"
 
     recent_errors=$(journalctl -p 0..3 --since "1 hour ago" --no-pager -n 5 2>/dev/null | grep -v "vc4-drm" | tail -n 5)
     if [ -n "$recent_errors" ]; then
@@ -1365,30 +1467,6 @@ generate_clock() {
         }
         printf "           %s%02d:%02d:%02d%s\n", bold, ($1+0), min, sec, nc
     }'
-}
-
-draw_clock_overlay() {
-    [ "$NO_COLOR" = true ] && return
-
-    local cols
-    cols=$(tput cols 2>/dev/null) || cols=80
-    local clock_width=31
-    local start_col=$((cols - clock_width - 2))
-    local start_row=1
-
-    if [ "$start_col" -lt 50 ]; then
-        return
-    fi
-
-    local clock_output
-    clock_output=$(generate_clock)
-
-    local row=$start_row
-    while IFS= read -r line; do
-        tput cup "$row" "$start_col" 2>/dev/null
-        echo -e "$line"
-        row=$((row + 1))
-    done <<< "$clock_output"
 }
 
 # ==============================================================================
@@ -1583,20 +1661,21 @@ update_throughput_state() {
 PREV_COLS=0
 
 render_frame() {
-    local current_cols
-    current_cols=$(tput cols 2>/dev/null) || current_cols=80
-    if [ "$current_cols" -ne "$PREV_COLS" ]; then
+    local cols
+    cols=$(tput cols 2>/dev/null) || cols=80
+    if [ "$cols" -ne "$PREV_COLS" ]; then
         clear
-        PREV_COLS=$current_cols
+        PREV_COLS=$cols
     fi
 
-    # Reserve the right-hand strip for the clock so content never wraps into it
-    if [ "$current_cols" -ge 86 ]; then
-        CONTENT_WIDTH=$(( current_cols - 36 ))
-    else
-        CONTENT_WIDTH=$(( current_cols - 1 ))
+    # Two columns once there is room for two readable panels side by side;
+    # otherwise everything stacks full width.
+    local two_col=false lw=$cols rw=0
+    if [ "$cols" -ge 128 ]; then
+        two_col=true
+        lw=$(( (cols - 1) / 2 ))
+        rw=$(( cols - 1 - lw ))
     fi
-    [ "$CONTENT_WIDTH" -lt 40 ] && CONTENT_WIDTH=40
 
     # Refresh derived counters before the buffer is built, so the subshell
     # below reads current values (globals set inside it would not survive).
@@ -1604,27 +1683,50 @@ render_frame() {
 
     local buffer
     buffer=$(
+        CONTENT_WIDTH=$cols
         print_header
 
-        if [ "$LESS_MODE" = true ]; then
-            check_hardware
-            [ "$SHOW_CPU" = true ] && check_cpu_info
-            [ "$SHOW_THERMAL" = true ] && check_thermal_expanded
-            [ "$PIHOLE_MODE" = true ] && check_pihole_v6
-            check_logs
+        if [ "$two_col" = true ]; then
+            local left right
+            left=$(
+                panel "HARDWARE & THERMAL" check_hardware "$lw"
+                [ "$SHOW_CPU" = true ] && panel "CPU INFORMATION" check_cpu_info "$lw"
+                if [ "$LESS_MODE" != true ]; then
+                    panel "STORAGE & MOUNTS" check_storage "$lw"
+                    [ "$SHOW_STORAGE_PERF" = true ] && panel "STORAGE PERFORMANCE" check_storage_performance "$lw"
+                fi
+                [ "$SHOW_THERMAL" = true ] && panel "THERMAL & SENSORS" check_thermal_expanded "$lw"
+            )
+            right=$(
+                clock_panel "$rw"
+                [ "$PIHOLE_MODE" = true ] && panel "PI-HOLE v6 ENGINE" check_pihole_v6 "$rw"
+                if [ "$LESS_MODE" != true ]; then
+                    panel "NETWORK" check_network_security "$rw"
+                    [ "$SHOW_NETWORK" = true ] && panel "NETWORK DIAGNOSTICS" check_network_diagnostics "$rw"
+                    [ "$SHOW_DOCKER" = true ] && panel "CONTAINERS" check_docker "$rw"
+                    [ "$SHOW_SECURITY" = true ] && panel "SECURITY AUDIT" check_security_audit "$rw"
+                fi
+            )
+            compose_columns "$left" "$right" "$lw"
         else
-            check_hardware
-            [ "$SHOW_CPU" = true ] && check_cpu_info
-            [ "$SHOW_THERMAL" = true ] && check_thermal_expanded
-            check_storage
-            [ "$SHOW_STORAGE_PERF" = true ] && check_storage_performance
-            [ "$PIHOLE_MODE" = true ] && check_pihole_v6
-            check_network_security
-            [ "$SHOW_NETWORK" = true ] && check_network_diagnostics
-            [ "$SHOW_DOCKER" = true ] && check_docker
-            [ "$SHOW_SECURITY" = true ] && check_security_audit
-            check_logs
+            panel "HARDWARE & THERMAL" check_hardware "$cols"
+            [ "$SHOW_CPU" = true ] && panel "CPU INFORMATION" check_cpu_info "$cols"
+            [ "$SHOW_THERMAL" = true ] && panel "THERMAL & SENSORS" check_thermal_expanded "$cols"
+            if [ "$LESS_MODE" != true ]; then
+                panel "STORAGE & MOUNTS" check_storage "$cols"
+                [ "$SHOW_STORAGE_PERF" = true ] && panel "STORAGE PERFORMANCE" check_storage_performance "$cols"
+            fi
+            [ "$PIHOLE_MODE" = true ] && panel "PI-HOLE v6 ENGINE" check_pihole_v6 "$cols"
+            if [ "$LESS_MODE" != true ]; then
+                panel "NETWORK" check_network_security "$cols"
+                [ "$SHOW_NETWORK" = true ] && panel "NETWORK DIAGNOSTICS" check_network_diagnostics "$cols"
+                [ "$SHOW_DOCKER" = true ] && panel "CONTAINERS" check_docker "$cols"
+                [ "$SHOW_SECURITY" = true ] && panel "SECURITY AUDIT" check_security_audit "$cols"
+            fi
         fi
+
+        # Logs span the full width: their lines are the longest on screen.
+        panel "LOGS & SYSTEM AUDIT STREAM" check_logs "$cols"
     )
 
     # Paint line-by-line, erasing each row's tail (\033[K) so leftover text
@@ -1635,7 +1737,6 @@ render_frame() {
         printf '%s\033[K\n' "$line"
     done <<< "$buffer"
     printf '\033[J'
-    draw_clock_overlay
 
     # Update throughput state after display (outside subshell)
     update_throughput_state
