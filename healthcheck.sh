@@ -23,7 +23,7 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.5.1"
+VERSION="1.5.2"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -438,14 +438,6 @@ box_title_row() {
 _MB_PROBE="●"
 if [ ${#_MB_PROBE} -eq 1 ]; then _MB_BYTES=false; else _MB_BYTES=true; fi
 unset _MB_PROBE
-
-# Line count of a buffer, without forking wc.
-_nlines=0
-count_lines() {
-    if [ -z "$1" ]; then _nlines=0; return; fi
-    local t="${1//[!$'\n']/}"
-    _nlines=$(( ${#t} + 1 ))
-}
 
 # Visible length of a string, ignoring ANSI SGR sequences.
 # Writes to the global _vislen instead of echoing, so callers avoid a fork
@@ -1693,60 +1685,57 @@ render_frame() {
         CONTENT_WIDTH=$cols
         print_header
 
-        # Ordered list of panels for the current mode and toggle state.
-        P_TITLE=(); P_FN=()
-        _add_panel() { P_TITLE+=("$1"); P_FN+=("$2"); }
-
-        _add_panel "HARDWARE & THERMAL" check_hardware
-        [ "$SHOW_CPU" = true ]     && _add_panel "CPU INFORMATION" check_cpu_info
-        [ "$SHOW_THERMAL" = true ] && _add_panel "THERMAL & SENSORS" check_thermal_expanded
-        if [ "$LESS_MODE" != true ]; then
-            _add_panel "STORAGE & MOUNTS" check_storage
-            [ "$SHOW_STORAGE_PERF" = true ] && _add_panel "STORAGE PERFORMANCE" check_storage_performance
-        fi
-        [ "$PIHOLE_MODE" = true ] && _add_panel "PI-HOLE v6 ENGINE" check_pihole_v6
-        if [ "$LESS_MODE" != true ]; then
-            _add_panel "NETWORK" check_network_security
-            [ "$SHOW_NETWORK" = true ]  && _add_panel "NETWORK DIAGNOSTICS" check_network_diagnostics
-            [ "$SHOW_DOCKER" = true ]   && _add_panel "CONTAINERS" check_docker
-            [ "$SHOW_SECURITY" = true ] && _add_panel "SECURITY AUDIT" check_security_audit
-        fi
-
+        # Panels are assigned to a fixed column so a toggle always opens on a
+        # predictable side:
+        #   LEFT   hardware, storage, network  + the d / s toggles
+        #   RIGHT  clock                       + the c / t / n toggles
+        #   BOTTOM security audit (a) and logs, full width
         if [ "$two_col" = true ]; then
-            LCOL=(); RCOL=(); lh=0; rh=0
-
-            # The clock is pinned to the top of the right column but is
-            # deliberately NOT counted toward rh: it is a fixed widget, and
-            # letting its height seed the balance would push every content
-            # panel into the left column.
-            if [ "$NO_COLOR" != true ]; then
-                RCOL+=("$(clock_panel "$pw")")
-            fi
-
-            # Greedy packing: each panel joins whichever column is shorter,
-            # so the panels themselves end up split evenly between the two.
-            for i in "${!P_TITLE[@]}"; do
-                body=$(panel "${P_TITLE[i]}" "${P_FN[i]}" "$pw")
-                count_lines "$body"
-                if [ "$lh" -le "$rh" ]; then
-                    LCOL+=("$body"); lh=$(( lh + _nlines ))
-                else
-                    RCOL+=("$body"); rh=$(( rh + _nlines ))
+            lbuf=$(
+                panel "HARDWARE & THERMAL" check_hardware "$pw"
+                if [ "$LESS_MODE" != true ]; then
+                    panel "STORAGE & MOUNTS" check_storage "$pw"
+                    [ "$SHOW_STORAGE_PERF" = true ] && panel "STORAGE PERFORMANCE" check_storage_performance "$pw"
                 fi
-            done
-
-            lbuf=""; rbuf=""
-            [ ${#LCOL[@]} -gt 0 ] && lbuf=$(printf '%s\n' "${LCOL[@]}")
-            [ ${#RCOL[@]} -gt 0 ] && rbuf=$(printf '%s\n' "${RCOL[@]}")
+                [ "$PIHOLE_MODE" = true ] && panel "PI-HOLE v6 ENGINE" check_pihole_v6 "$pw"
+                if [ "$LESS_MODE" != true ]; then
+                    panel "NETWORK" check_network_security "$pw"
+                    [ "$SHOW_DOCKER" = true ] && panel "CONTAINERS" check_docker "$pw"
+                fi
+                true
+            )
+            rbuf=$(
+                [ "$NO_COLOR" != true ] && clock_panel "$pw"
+                [ "$SHOW_CPU" = true ]     && panel "CPU INFORMATION" check_cpu_info "$pw"
+                [ "$SHOW_THERMAL" = true ] && panel "THERMAL & SENSORS" check_thermal_expanded "$pw"
+                if [ "$LESS_MODE" != true ]; then
+                    [ "$SHOW_NETWORK" = true ] && panel "NETWORK DIAGNOSTICS" check_network_diagnostics "$pw"
+                fi
+                true
+            )
             compose_columns "$lbuf" "$rbuf" "$pw"
         else
             [ "$NO_COLOR" != true ] && clock_panel "$cols"
-            for i in "${!P_TITLE[@]}"; do
-                panel "${P_TITLE[i]}" "${P_FN[i]}" "$cols"
-            done
+            panel "HARDWARE & THERMAL" check_hardware "$cols"
+            [ "$SHOW_CPU" = true ]     && panel "CPU INFORMATION" check_cpu_info "$cols"
+            [ "$SHOW_THERMAL" = true ] && panel "THERMAL & SENSORS" check_thermal_expanded "$cols"
+            if [ "$LESS_MODE" != true ]; then
+                panel "STORAGE & MOUNTS" check_storage "$cols"
+                [ "$SHOW_STORAGE_PERF" = true ] && panel "STORAGE PERFORMANCE" check_storage_performance "$cols"
+            fi
+            [ "$PIHOLE_MODE" = true ] && panel "PI-HOLE v6 ENGINE" check_pihole_v6 "$cols"
+            if [ "$LESS_MODE" != true ]; then
+                panel "NETWORK" check_network_security "$cols"
+                [ "$SHOW_NETWORK" = true ] && panel "NETWORK DIAGNOSTICS" check_network_diagnostics "$cols"
+                [ "$SHOW_DOCKER" = true ]  && panel "CONTAINERS" check_docker "$cols"
+            fi
         fi
 
-        # Logs span the full width: their lines are the longest on screen.
+        # Full width at the bottom: the audit table and the logs both carry
+        # long lines that would be cramped in a half-width column.
+        if [ "$LESS_MODE" != true ] && [ "$SHOW_SECURITY" = true ]; then
+            panel "SECURITY AUDIT" check_security_audit "$cols"
+        fi
         panel "LOGS & SYSTEM AUDIT STREAM" check_logs "$cols"
     )
 
