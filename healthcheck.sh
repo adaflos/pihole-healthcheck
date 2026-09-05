@@ -23,7 +23,7 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.3.2"
+VERSION="1.3.3"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -52,6 +52,9 @@ JSON_MODE=false
 NO_COLOR=false
 LOG_FILE=""
 WEBHOOK_URL=""
+
+# --- Layout ---
+CONTENT_WIDTH=80
 
 # --- Thresholds ---
 TEMP_LIMIT=75
@@ -440,8 +443,13 @@ print_header() {
 }
 
 print_section() {
+    local w=${CONTENT_WIDTH:-80}
+    [ "$w" -gt 80 ] && w=80
+    local sep
+    printf -v sep '%*s' "$w" ''
+    sep=${sep// /─}
     echo -e "${BOLD}${BLUE}▸ $1${NC}"
-    echo -e "${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
+    echo -e "${DIM}${sep}${NC}"
 }
 
 print_status() {
@@ -454,6 +462,17 @@ print_status() {
         WARN) printf "  [${YELLOW} WARN ${NC}] ${BOLD}%-22s${NC} : %b\n" "$label" "$detail" ;;
         FAIL) printf "  [${RED} FAIL ${NC}] ${BOLD}%-22s${NC} : %b\n" "$label" "$detail" ;;
     esac
+}
+
+# Print an indented detail line, hard-truncated so it can never wrap.
+print_detail() {
+    local text="$1"
+    local max=$(( ${CONTENT_WIDTH:-80} - 8 ))
+    [ "$max" -lt 20 ] && max=20
+    if [ "${#text}" -gt "$max" ]; then
+        text="${text:0:$max}"
+    fi
+    printf '      %b%s%b\n' "$DIM" "$text" "$NC"
 }
 
 draw_progress_bar() {
@@ -589,7 +608,7 @@ check_cpu_info() {
     if [ -n "$top_procs" ]; then
         print_status "Top Processes (CPU)" "OK" ""
         echo "$top_procs" | while read -r line; do
-            echo -e "      ${DIM}${line}${NC}"
+            print_detail "$line"
         done
     fi
     echo ""
@@ -796,7 +815,9 @@ check_network_diagnostics() {
         }' | sort -t' ' -k1 -n | head -8)
         if [ -n "$listeners" ]; then
             print_status "Listening Ports" "OK" "Top listeners:"
-            echo -e "${DIM}${listeners}${NC}"
+            while IFS= read -r lline; do
+                print_detail "$(echo "$lline" | sed 's/^ *//')"
+            done <<< "$listeners"
         fi
     fi
 
@@ -892,7 +913,7 @@ check_docker() {
         if [ -n "$top_containers" ]; then
             print_status "Running Containers" "OK" ""
             echo "$top_containers" | while IFS=$'\t' read -r name status; do
-                printf "      ${DIM}%-25s %s${NC}\n" "$name" "$status"
+                print_detail "$(printf '%-25s %s' "$name" "$status")"
             done
         fi
     fi
@@ -1065,7 +1086,7 @@ check_logs() {
     if [ -n "$recent_errors" ]; then
         print_status "System Errors (1h)" "WARN" "Errors detected:"
         echo "$recent_errors" | while read -r line; do
-            echo -e "      ${DIM}${line}${NC}"
+            print_detail "$line"
         done
     else
         print_status "System Errors (1h)" "OK" "No critical errors"
@@ -1076,7 +1097,7 @@ check_logs() {
         if [ -n "$ftl_logs" ]; then
             print_status "FTL Log Events (2h)" "WARN" "Recent entries:"
             echo "$ftl_logs" | while read -r line; do
-                echo -e "      ${DIM}${line}${NC}"
+                print_detail "$line"
             done
         else
             print_status "FTL Log Events (2h)" "OK" "Clean (No events in last 2h)"
@@ -1102,7 +1123,7 @@ check_logs() {
         if [ -n "$last_queries" ]; then
             print_status "Live DNS Traffic" "OK" "Recent queries:"
             echo "$last_queries" | while read -r line; do
-                echo -e "      ${DIM}${line}${NC}"
+                print_detail "$line"
             done
         fi
     fi
@@ -1413,6 +1434,14 @@ render_frame() {
         PREV_COLS=$current_cols
     fi
 
+    # Reserve the right-hand strip for the clock so content never wraps into it
+    if [ "$current_cols" -ge 86 ]; then
+        CONTENT_WIDTH=$(( current_cols - 36 ))
+    else
+        CONTENT_WIDTH=$(( current_cols - 1 ))
+    fi
+    [ "$CONTENT_WIDTH" -lt 40 ] && CONTENT_WIDTH=40
+
     local buffer
     buffer=$(
         print_header
@@ -1438,9 +1467,14 @@ render_frame() {
         fi
     )
 
+    # Paint line-by-line, erasing each row's tail (\033[K) so leftover text
+    # from a previous, longer frame cannot survive. %s avoids re-interpreting
+    # backslashes that appear in log content.
     tput cup 0 0 2>/dev/null
-    echo -e "$buffer"
-    tput ed 2>/dev/null
+    while IFS= read -r line; do
+        printf '%s\033[K\n' "$line"
+    done <<< "$buffer"
+    printf '\033[J'
     draw_clock_overlay
 
     # Update throughput state after display (outside subshell)
