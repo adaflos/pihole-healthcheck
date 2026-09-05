@@ -23,7 +23,7 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -435,8 +435,17 @@ box_title_row() {
 # Does ${#str} count bytes rather than characters? True under a non-UTF-8
 # locale (C/POSIX), which is the default on minimal Pi OS / Debian installs.
 # Probed once at startup rather than assumed.
-if [ ${#_MB_PROBE} -eq 0 ]; then _MB_PROBE="●"; fi
+_MB_PROBE="●"
 if [ ${#_MB_PROBE} -eq 1 ]; then _MB_BYTES=false; else _MB_BYTES=true; fi
+unset _MB_PROBE
+
+# Line count of a buffer, without forking wc.
+_nlines=0
+count_lines() {
+    if [ -z "$1" ]; then _nlines=0; return; fi
+    local t="${1//[!$'\n']/}"
+    _nlines=$(( ${#t} + 1 ))
+}
 
 # Visible length of a string, ignoring ANSI SGR sequences.
 # Writes to the global _vislen instead of echoing, so callers avoid a fork
@@ -485,10 +494,13 @@ box_wrap() {
 }
 
 # Run a check function inside a box, sizing its content to the panel.
+# stderr is discarded: it would bypass this capture and print straight to the
+# terminal, tearing a hole in the frame. Diagnosing a probe is not worth
+# corrupting the display, and every check already reports its own failures.
 panel() {
     local title="$1" fn="$2" w="$3"
     local content
-    content=$( CONTENT_WIDTH=$(( w - 3 )); "$fn" )
+    content=$( CONTENT_WIDTH=$(( w - 3 )); "$fn" 2>/dev/null )
     box_wrap "$title" "$content" "$w"
 }
 
@@ -581,15 +593,6 @@ fmt_uptime() {
     else                      printf '%dm' "$m"; fi
 }
 
-# Human-readable byte counts.
-fmt_bytes() {
-    awk -v b="${1:-0}" 'BEGIN{
-        split("B KB MB GB TB PB", u, " "); i=1
-        while (b >= 1024 && i < 6) { b /= 1024; i++ }
-        if (i == 1) printf "%d %s", b, u[i]; else printf "%.1f %s", b, u[i]
-    }'
-}
-
 print_header() {
     print_os_logo
 
@@ -647,15 +650,6 @@ hotkey() {
     else
         printf '%b%s%b%b%s%b' "$BOLD" "$key" "$NC" "$DIM" "$rest" "$NC"
     fi
-}
-
-# Section heading: "▸ TITLE ──────────────────" filling the content width.
-print_section() {
-    local title="$1"
-    local fill=$(( CONTENT_WIDTH - ${#title} - 4 ))
-    [ "$fill" -lt 0 ] && fill=0
-    printf '%b▸ %s%b %b%s%b\n' \
-        "${BOLD}${BLUE}" "$title" "$NC" "$DIM" "$(repeat_char '─' "$fill")" "$NC"
 }
 
 # Status line: "  ● Label                value"
@@ -734,8 +728,11 @@ check_hardware() {
     if command -v vcgencmd &>/dev/null; then
         temp_raw=$(vcgencmd measure_temp | awk -F'=' '{print $2}' | tr -d "'C")
         temp_int=${temp_raw%.*}
+        # Guard against vcgencmd returning nothing: an empty operand would make
+        # [ -lt ] write to stderr, which escapes the frame buffer.
+        case "$temp_int" in ''|*[!0-9-]*) temp_int=0; temp_raw="n/a" ;; esac
         freq_raw=$(vcgencmd measure_clock arm | awk -F'=' '{print $2}')
-        freq_raw=${freq_raw:-0}
+        case "$freq_raw" in ''|*[!0-9]*) freq_raw=0 ;; esac
         freq_mhz=$(( freq_raw / 1000000 ))
 
         if [ "$temp_int" -lt "$TEMP_LIMIT" ]; then
@@ -755,6 +752,7 @@ check_hardware() {
     elif [ -f /sys/class/thermal/thermal_zone0/temp ]; then
         temp_raw=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp)
         temp_int=${temp_raw%.*}
+        case "$temp_int" in ''|*[!0-9-]*) temp_int=0; temp_raw="n/a" ;; esac
         if [ "$temp_int" -lt "$TEMP_LIMIT" ]; then
             print_status "CPU Temp" "OK" "${temp_raw}°C"
         elif [ "$temp_int" -lt $(( TEMP_LIMIT + 10 )) ]; then
@@ -1087,6 +1085,11 @@ check_network_diagnostics() {
     fi
 
     # Live Network Throughput
+    # Resolve the interface locally: each panel renders in its own subshell,
+    # so a value set by check_network_security is not visible here.
+    local main_iface
+    main_iface=$(ip route 2>/dev/null | grep default | awk '{print $5}' | head -n1)
+
     if [ -n "$main_iface" ] && [ -f /proc/net/dev ]; then
         local rx_bytes tx_bytes now_ts
         read -r rx_bytes tx_bytes <<< "$(awk -v iface="$main_iface" '$0 ~ iface":" {gsub(/.*:/, "", $0); print $1, $9}' /proc/net/dev)"
@@ -1560,8 +1563,11 @@ check_webhook_alerts() {
 
     local alerts=""
 
+    # This runs outside the panel capture, so an empty operand here would print
+    # its error straight onto the rendered frame.
     local ram_pct
-    ram_pct=$(free | awk '/^Mem:/{total=$2; used=$3; if(total>0) printf "%d", used*100/total; else print "0"}')
+    ram_pct=$(free 2>/dev/null | awk '/^Mem:/{total=$2; used=$3; if(total>0) printf "%d", used*100/total; else print "0"}')
+    ram_pct=${ram_pct:-0}
     if [ "$ram_pct" -gt "$RAM_LIMIT" ]; then
         alerts+="RAM usage at ${ram_pct}% (limit: ${RAM_LIMIT}%)\\n"
     fi
@@ -1575,9 +1581,10 @@ check_webhook_alerts() {
 
     if command -v vcgencmd &>/dev/null; then
         local temp
-        temp=$(vcgencmd measure_temp | awk -F'=' '{print $2}' | tr -d "'C")
+        temp=$(vcgencmd measure_temp 2>/dev/null | awk -F'=' '{print $2}' | tr -d "'C")
         local temp_int=${temp%.*}
-        if [ "${temp_int:-0}" -gt "$TEMP_LIMIT" ]; then
+        case "$temp_int" in ''|*[!0-9-]*) temp_int=0 ;; esac
+        if [ "$temp_int" -gt "$TEMP_LIMIT" ]; then
             alerts+="CPU temp at ${temp}°C (limit: ${TEMP_LIMIT}°C)\\n"
         fi
     fi
@@ -1669,12 +1676,12 @@ render_frame() {
     fi
 
     # Two columns once there is room for two readable panels side by side;
-    # otherwise everything stacks full width.
-    local two_col=false lw=$cols rw=0
+    # otherwise everything stacks full width. Both columns share one width so
+    # a panel can be rendered before its column is chosen.
+    local two_col=false pw=$cols
     if [ "$cols" -ge 128 ]; then
         two_col=true
-        lw=$(( (cols - 1) / 2 ))
-        rw=$(( cols - 1 - lw ))
+        pw=$(( (cols - 1) / 2 ))
     fi
 
     # Refresh derived counters before the buffer is built, so the subshell
@@ -1686,43 +1693,57 @@ render_frame() {
         CONTENT_WIDTH=$cols
         print_header
 
+        # Ordered list of panels for the current mode and toggle state.
+        P_TITLE=(); P_FN=()
+        _add_panel() { P_TITLE+=("$1"); P_FN+=("$2"); }
+
+        _add_panel "HARDWARE & THERMAL" check_hardware
+        [ "$SHOW_CPU" = true ]     && _add_panel "CPU INFORMATION" check_cpu_info
+        [ "$SHOW_THERMAL" = true ] && _add_panel "THERMAL & SENSORS" check_thermal_expanded
+        if [ "$LESS_MODE" != true ]; then
+            _add_panel "STORAGE & MOUNTS" check_storage
+            [ "$SHOW_STORAGE_PERF" = true ] && _add_panel "STORAGE PERFORMANCE" check_storage_performance
+        fi
+        [ "$PIHOLE_MODE" = true ] && _add_panel "PI-HOLE v6 ENGINE" check_pihole_v6
+        if [ "$LESS_MODE" != true ]; then
+            _add_panel "NETWORK" check_network_security
+            [ "$SHOW_NETWORK" = true ]  && _add_panel "NETWORK DIAGNOSTICS" check_network_diagnostics
+            [ "$SHOW_DOCKER" = true ]   && _add_panel "CONTAINERS" check_docker
+            [ "$SHOW_SECURITY" = true ] && _add_panel "SECURITY AUDIT" check_security_audit
+        fi
+
         if [ "$two_col" = true ]; then
-            local left right
-            left=$(
-                panel "HARDWARE & THERMAL" check_hardware "$lw"
-                [ "$SHOW_CPU" = true ] && panel "CPU INFORMATION" check_cpu_info "$lw"
-                if [ "$LESS_MODE" != true ]; then
-                    panel "STORAGE & MOUNTS" check_storage "$lw"
-                    [ "$SHOW_STORAGE_PERF" = true ] && panel "STORAGE PERFORMANCE" check_storage_performance "$lw"
+            LCOL=(); RCOL=(); lh=0; rh=0
+
+            # The clock is pinned to the top of the right column but is
+            # deliberately NOT counted toward rh: it is a fixed widget, and
+            # letting its height seed the balance would push every content
+            # panel into the left column.
+            if [ "$NO_COLOR" != true ]; then
+                RCOL+=("$(clock_panel "$pw")")
+            fi
+
+            # Greedy packing: each panel joins whichever column is shorter,
+            # so the panels themselves end up split evenly between the two.
+            for i in "${!P_TITLE[@]}"; do
+                body=$(panel "${P_TITLE[i]}" "${P_FN[i]}" "$pw")
+                count_lines "$body"
+                if [ "$lh" -le "$rh" ]; then
+                    LCOL+=("$body"); lh=$(( lh + _nlines ))
+                else
+                    RCOL+=("$body"); rh=$(( rh + _nlines ))
                 fi
-                [ "$SHOW_THERMAL" = true ] && panel "THERMAL & SENSORS" check_thermal_expanded "$lw"
-            )
-            right=$(
-                clock_panel "$rw"
-                [ "$PIHOLE_MODE" = true ] && panel "PI-HOLE v6 ENGINE" check_pihole_v6 "$rw"
-                if [ "$LESS_MODE" != true ]; then
-                    panel "NETWORK" check_network_security "$rw"
-                    [ "$SHOW_NETWORK" = true ] && panel "NETWORK DIAGNOSTICS" check_network_diagnostics "$rw"
-                    [ "$SHOW_DOCKER" = true ] && panel "CONTAINERS" check_docker "$rw"
-                    [ "$SHOW_SECURITY" = true ] && panel "SECURITY AUDIT" check_security_audit "$rw"
-                fi
-            )
-            compose_columns "$left" "$right" "$lw"
+            done
+
+            lbuf=""; rbuf=""
+            [ ${#LCOL[@]} -gt 0 ] && lbuf=$(printf '%s\n' "${LCOL[@]}")
+            [ ${#RCOL[@]} -gt 0 ] && rbuf=$(printf '%s\n' "${RCOL[@]}")
+            compose_columns "$lbuf" "$rbuf" "$pw"
         else
-            panel "HARDWARE & THERMAL" check_hardware "$cols"
-            [ "$SHOW_CPU" = true ] && panel "CPU INFORMATION" check_cpu_info "$cols"
-            [ "$SHOW_THERMAL" = true ] && panel "THERMAL & SENSORS" check_thermal_expanded "$cols"
-            if [ "$LESS_MODE" != true ]; then
-                panel "STORAGE & MOUNTS" check_storage "$cols"
-                [ "$SHOW_STORAGE_PERF" = true ] && panel "STORAGE PERFORMANCE" check_storage_performance "$cols"
-            fi
-            [ "$PIHOLE_MODE" = true ] && panel "PI-HOLE v6 ENGINE" check_pihole_v6 "$cols"
-            if [ "$LESS_MODE" != true ]; then
-                panel "NETWORK" check_network_security "$cols"
-                [ "$SHOW_NETWORK" = true ] && panel "NETWORK DIAGNOSTICS" check_network_diagnostics "$cols"
-                [ "$SHOW_DOCKER" = true ] && panel "CONTAINERS" check_docker "$cols"
-                [ "$SHOW_SECURITY" = true ] && panel "SECURITY AUDIT" check_security_audit "$cols"
-            fi
+            [ "$NO_COLOR" != true ] && clock_panel "$cols"
+            for i in "${!P_TITLE[@]}"; do
+                panel "${P_TITLE[i]}" "${P_FN[i]}" "$cols"
+            done
         fi
 
         # Logs span the full width: their lines are the longest on screen.
