@@ -3,7 +3,7 @@
 Interactive top-style terminal dashboard for monitoring any Linux system. Supports **Pi-hole v6** monitoring out of the box, but works as a general-purpose system health tool on any distro.
 
 ![Bash](https://img.shields.io/badge/Bash-4+-green?logo=gnubash&logoColor=white)
-![Version](https://img.shields.io/badge/Version-1.3.1-orange)
+![Version](https://img.shields.io/badge/Version-1.4.0-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 ## Screenshots
@@ -16,9 +16,13 @@ Interactive top-style terminal dashboard for monitoring any Linux system. Suppor
 
 ## Features
 
+- **Fully adaptive layout** — header box, section rules, and progress bars all resize to the terminal; nothing wraps or misaligns at any width
 - **Runs on any Linux distro** — auto-detects OS and displays a colored ASCII logo
 - **Regular & Pi-hole modes** — system-only monitoring or full Pi-hole dashboard, auto-detected and toggleable at runtime
 - **Flicker-free refresh** — redraws in-place like `top`/`btop`, no screen clearing (default: 1s)
+- **Live CPU utilisation** — true CPU%, computed from `/proc/stat` jiffy deltas between frames
+- **Memory & swap gauges** — colored bars with used/total figures
+- **Active-panel hotkey legend** — enabled panels light up green in the key hints
 - **ASCII analog clock** — lines-only clock overlay on the right side of the terminal
 - **Keyboard controls** — toggle views, modes, and panels without restarting
 - **Hardware monitoring** — CPU temperature, clock speed, throttling state, RAM usage
@@ -127,7 +131,7 @@ Flags can be combined: `healthcheck -r -l -n 3 --ram-limit 90 --webhook https://
 
 | Section | Checks |
 |---------|--------|
-| **Hardware** | CPU temp, clock frequency, voltage/throttling flags, RAM usage, failed systemd units |
+| **Hardware** | CPU temp, clock frequency, live CPU utilisation %, memory & swap gauges, voltage/throttling flags, failed systemd units |
 | **CPU Info** | Model, core count, load average, governor, frequency range, core voltage, top 5 processes (toggle with `c`) |
 | **Storage** | Root disk usage, read-write verification, SD card I/O errors (dmesg) |
 | **Network** | Default interface, local IP, public internet reachability |
@@ -150,12 +154,20 @@ Flags can be combined: `healthcheck -r -l -n 3 --ram-limit 90 --webhook https://
 | **Pi-hole Engine** | pihole-FTL service status & memory, DNS query latency via loopback |
 | **Pi-hole Logs** | FTL log events (2h), live DNS query traffic |
 
-## Bar Colors
+## Status Indicators
+
+| Icon | Meaning |
+|------|---------|
+| `●` green | Healthy |
+| `▲` yellow | Warning — attention advised |
+| `✖` red | Failure — action needed |
 
 Progress bars change color based on usage:
 - **Green** — 0-50%
 - **Yellow** — 51-75%
 - **Red** — 76-100%
+
+Bars widen on roomy terminals and shrink on narrow ones, so the layout stays readable from ~50 columns upward.
 
 ## JSON Output
 

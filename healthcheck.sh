@@ -23,7 +23,7 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.3.3"
+VERSION="1.4.0"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -68,6 +68,11 @@ _prev_net_ts=0
 _prev_read_sectors=0
 _prev_write_sectors=0
 _prev_disk_ts=0
+
+# --- CPU utilisation tracking (delta between frames) ---
+CPU_USAGE_PCT=0
+_prev_cpu_total=0
+_prev_cpu_idle=0
 
 # --- Auto-detect Pi-hole ---
 if command -v pihole &>/dev/null || systemctl list-unit-files pihole-FTL.service &>/dev/null; then
@@ -392,76 +397,175 @@ print_os_logo() {
     echo ""
 }
 
-# --- UI Helpers ---
+# ==============================================================================
+# UI PRIMITIVES
+#
+# Every drawing helper sizes itself from CONTENT_WIDTH, which render_frame
+# recomputes each frame from the real terminal width (minus the clock strip).
+# Padding is always measured on plain text first; colour codes are injected
+# afterwards so ANSI bytes never corrupt column alignment.
+# ==============================================================================
+
+# Repeat a (possibly multi-byte) character N times.
+repeat_char() {
+    local ch="$1" n="$2" out=""
+    [ "$n" -lt 1 ] && { printf ''; return; }
+    printf -v out '%*s' "$n" ''
+    printf '%s' "${out// /$ch}"
+}
+
+# Box borders: top / divider / bottom, sized to CONTENT_WIDTH.
+box_top()    { printf '%b╭%s╮%b\n' "$CYAN" "$(repeat_char '─' $(( CONTENT_WIDTH - 2 )))" "$NC"; }
+box_div()    { printf '%b├%s┤%b\n' "$CYAN" "$(repeat_char '─' $(( CONTENT_WIDTH - 2 )))" "$NC"; }
+box_bottom() { printf '%b╰%s╯%b\n' "$CYAN" "$(repeat_char '─' $(( CONTENT_WIDTH - 2 )))" "$NC"; }
+
+# Title row: "│ <title>            v1.4.0 │"
+# emoji_extra accounts for glyphs that occupy 2 cells but count as 1 character.
+box_title_row() {
+    local title="$1" emoji_extra="${2:-0}"
+    local inner=$(( CONTENT_WIDTH - 4 ))
+    local vlabel="v${VERSION}"
+    local pad=$(( inner - ${#title} - ${#vlabel} - emoji_extra ))
+    [ "$pad" -lt 1 ] && pad=1
+    printf '%b│%b %b%s%b%*s%b%s%b %b│%b\n' \
+        "$CYAN" "$NC" "${BOLD}${PURPLE}" "$title" "$NC" \
+        "$pad" '' "$DIM" "$vlabel" "$NC" "$CYAN" "$NC"
+}
+
+# Pad a string to N display columns.
+# Uses ${#s} (character count) rather than printf's %-*s, which pads by BYTES
+# and so misaligns any cell containing multi-byte UTF-8.
+pad_to() {
+    local s="$1" w="$2"
+    local n=$(( w - ${#s} ))
+    [ "$n" -gt 0 ] && s+=$(printf '%*s' "$n" '')
+    printf '%s' "$s"
+}
+
+# Two-column key/value row inside the box. Padding is computed on plain text,
+# then the 8-char label prefix of each cell is dimmed.
+box_kv_row() {
+    local l1="$1" v1="$2" l2="$3" v2="$4"
+    local inner=$(( CONTENT_WIDTH - 4 ))
+    local lw=$(( inner / 2 ))
+    local rw=$(( inner - lw ))
+
+    local lcell rcell
+    lcell="$(pad_to "$l1" 8)${v1}"
+    rcell="$(pad_to "$l2" 8)${v2}"
+    lcell=$(pad_to "${lcell:0:$lw}" "$lw")
+    rcell=$(pad_to "${rcell:0:$rw}" "$rw")
+
+    printf '%b│%b %b%s%b%s%b%s%b%s %b│%b\n' \
+        "$CYAN" "$NC" \
+        "$DIM" "${lcell:0:8}" "$NC" "${lcell:8}" \
+        "$DIM" "${rcell:0:8}" "$NC" "${rcell:8}" \
+        "$CYAN" "$NC"
+}
+
+# Compact uptime: "25d 8h 15m" rather than "3 weeks, 4 days, 8 hours...".
+fmt_uptime() {
+    [ -f /proc/uptime ] || { uptime -p 2>/dev/null | sed 's/up //'; return; }
+    local secs d h m
+    secs=$(awk '{print int($1)}' /proc/uptime)
+    d=$(( secs / 86400 )); h=$(( (secs % 86400) / 3600 )); m=$(( (secs % 3600) / 60 ))
+    if   [ "$d" -gt 0 ]; then printf '%dd %dh %dm' "$d" "$h" "$m"
+    elif [ "$h" -gt 0 ]; then printf '%dh %dm' "$h" "$m"
+    else                      printf '%dm' "$m"; fi
+}
+
+# Human-readable byte counts.
+fmt_bytes() {
+    awk -v b="${1:-0}" 'BEGIN{
+        split("B KB MB GB TB PB", u, " "); i=1
+        while (b >= 1024 && i < 6) { b /= 1024; i++ }
+        if (i == 1) printf "%d %s", b, u[i]; else printf "%.1f %s", b, u[i]
+    }'
+}
+
 print_header() {
     print_os_logo
 
-    local mode_label
+    local title emoji_extra
     if [ "$LESS_MODE" = true ]; then
-        mode_label="${YELLOW}LOG-ONLY${NC}"
+        if [ "$PIHOLE_MODE" = true ]; then
+            title="🍓 LIVE LOG & EVENT MONITOR (Pi-hole v6)"; emoji_extra=1
+        else
+            title="📋 LIVE LOG & EVENT MONITOR"; emoji_extra=1
+        fi
     else
-        mode_label="${GREEN}FULL${NC}"
+        if [ "$PIHOLE_MODE" = true ]; then
+            title="🍓 PI-HOLE v6 & SYSTEM DASHBOARD"; emoji_extra=1
+        else
+            title="🖥  SYSTEM HEALTH DASHBOARD"; emoji_extra=1
+        fi
     fi
 
-    if [ "$LESS_MODE" = true ]; then
-        local log_title
-        if [ "$PIHOLE_MODE" = true ]; then
-            log_title="🍓 LIVE LOG & EVENT MONITOR (Pi-hole v6)"
-        else
-            log_title="📋 LIVE LOG & EVENT MONITOR"
-        fi
-        echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────────────────┐${NC}"
-        printf "${CYAN}│${NC} ${BOLD}${PURPLE}  %-43s${NC}              ${DIM}v%-12s${NC}${CYAN}│${NC}\n" "$log_title" "$VERSION"
-        echo -e "${CYAN}├──────────────────────────────────────────────────────────────────────────────┤${NC}"
-        printf "${CYAN}│${NC} ${BOLD}Host:${NC} %-12s ${BOLD}Time:${NC} %-25s ${BOLD}Load:${NC} %-15s ${CYAN}│${NC}\n" \
-            "$(hostname)" "$(date '+%Y-%m-%d %H:%M:%S')" "$(uptime | awk -F'load average:' '{print $2}' | xargs)"
-        echo -e "${CYAN}└──────────────────────────────────────────────────────────────────────────────┘${NC}"
-    else
-        local dash_title
-        if [ "$PIHOLE_MODE" = true ]; then
-            dash_title="🍓 PI-HOLE v6 & SYSTEM DASHBOARD"
-        else
-            dash_title="🖥  SYSTEM HEALTH DASHBOARD"
-        fi
-        echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────────────────┐${NC}"
-        printf "${CYAN}│${NC} ${BOLD}${PURPLE}  %-43s${NC}              ${DIM}v%-12s${NC}${CYAN}│${NC}\n" "$dash_title" "$VERSION"
-        echo -e "${CYAN}├──────────────────────────────────────────────────────────────────────────────┤${NC}"
-        printf "${CYAN}│${NC} ${BOLD}Host:${NC} %-12s ${BOLD}OS:${NC} %-18s ${BOLD}Uptime:${NC} %-17s ${CYAN}│${NC}\n" \
-            "$(hostname)" "$(uname -s) $(uname -r | cut -d'-' -f1)" "$(uptime -p | sed 's/up //')"
-        printf "${CYAN}│${NC} ${BOLD}Time:${NC} %-25s ${BOLD}Load:${NC} %-23s ${CYAN}│${NC}\n" \
-            "$(date '+%Y-%m-%d %H:%M:%S')" "$(uptime | awk -F'load average:' '{print $2}' | xargs)"
-        echo -e "${CYAN}└──────────────────────────────────────────────────────────────────────────────┘${NC}"
-    fi
-    local pihole_label
-    if [ "$PIHOLE_MODE" = true ]; then
-        pihole_label="${PURPLE}PIHOLE${NC}"
-    else
-        pihole_label="${CYAN}SYSTEM${NC}"
-    fi
-    echo -e " ${DIM}View: ${NC}${mode_label}  ${DIM}│  Scope: ${NC}${pihole_label}  ${DIM}│  Refresh: ${NC}${REFRESH}s  ${DIM}│  ${NC}${BOLD}q${NC}${DIM}uit ${NC}${BOLD}r${NC}${DIM}efresh ${NC}${BOLD}l${NC}${DIM}og ${NC}${BOLD}c${NC}${DIM}pu ${NC}${BOLD}p${NC}${DIM}ihole ${NC}${BOLD}d${NC}${DIM}ocker ${NC}${BOLD}n${NC}${DIM}et ${NC}${BOLD}s${NC}${DIM}tor ${NC}${BOLD}t${NC}${DIM}herm ${NC}${BOLD}a${NC}${DIM}udit${NC}"
-    echo ""
+    # Keep box-cell content ASCII: cells are padded by character count, and a
+    # multi-byte separator here would shift the right-hand border.
+    local loadavg
+    loadavg=$(awk '{printf "%s  %s  %s", $1, $2, $3}' /proc/loadavg 2>/dev/null)
+
+    box_top
+    box_title_row "$title" "$emoji_extra"
+    box_div
+    box_kv_row "Host" "$(hostname)"                  "Uptime" "$(fmt_uptime)"
+    box_kv_row "OS"   "${OS_NAME:-Linux}"            "Kernel" "$(uname -r)"
+    box_kv_row "Time" "$(date '+%Y-%m-%d %H:%M:%S')" "Load"   "${loadavg:-n/a}"
+    box_bottom
+
+    # Status strip: current view / scope / interval, then the hotkey legend.
+    local view_label scope_label
+    if [ "$LESS_MODE" = true ]; then view_label="${YELLOW}LOG-ONLY${NC}"; else view_label="${GREEN}FULL${NC}"; fi
+    if [ "$PIHOLE_MODE" = true ]; then scope_label="${PURPLE}PIHOLE${NC}"; else scope_label="${CYAN}SYSTEM${NC}"; fi
+
+    printf ' %b %b %b %b %b%bs%b\n' \
+        "$view_label" "${DIM}·${NC}" "$scope_label" "${DIM}·${NC}" "${BOLD}${REFRESH}" "$DIM" "$NC"
+
+    # Hotkey legend, marking which toggle panels are currently on.
+    local keys=""
+    keys+="$(hotkey q quit off)  $(hotkey r efresh off)  "
+    keys+="$(hotkey l og "$LESS_MODE")  $(hotkey c pu "$SHOW_CPU")  "
+    keys+="$(hotkey p ihole "$PIHOLE_MODE")  $(hotkey d ocker "$SHOW_DOCKER")  "
+    keys+="$(hotkey n et "$SHOW_NETWORK")  $(hotkey s torage "$SHOW_STORAGE_PERF")  "
+    keys+="$(hotkey t hermal "$SHOW_THERMAL")  $(hotkey a udit "$SHOW_SECURITY")"
+    printf ' %b\n\n' "$keys"
 }
 
+# Render one hotkey hint; highlights the key when its panel is active.
+hotkey() {
+    local key="$1" rest="$2" active="$3"
+    if [ "$active" = true ]; then
+        printf '%b%s%b%b%s%b' "${BOLD}${GREEN}" "$key" "$NC" "$GREEN" "$rest" "$NC"
+    else
+        printf '%b%s%b%b%s%b' "$BOLD" "$key" "$NC" "$DIM" "$rest" "$NC"
+    fi
+}
+
+# Section heading: "▸ TITLE ──────────────────" filling the content width.
 print_section() {
-    local w=${CONTENT_WIDTH:-80}
-    [ "$w" -gt 80 ] && w=80
-    local sep
-    printf -v sep '%*s' "$w" ''
-    sep=${sep// /─}
-    echo -e "${BOLD}${BLUE}▸ $1${NC}"
-    echo -e "${DIM}${sep}${NC}"
+    local title="$1"
+    local fill=$(( CONTENT_WIDTH - ${#title} - 4 ))
+    [ "$fill" -lt 0 ] && fill=0
+    printf '%b▸ %s%b %b%s%b\n' \
+        "${BOLD}${BLUE}" "$title" "$NC" "$DIM" "$(repeat_char '─' "$fill")" "$NC"
 }
 
+# Status line: "  ● Label                value"
+# Labels are truncated to the column width so a long mount path cannot shove
+# the value column out of alignment.
 print_status() {
-    local label="$1"
-    local status="$2"
-    local detail="$3"
-
+    local label="$1" status="$2" detail="$3"
+    local icon color
     case "$status" in
-        OK)   printf "  [${GREEN}  OK  ${NC}] ${BOLD}%-22s${NC} : %b\n" "$label" "$detail" ;;
-        WARN) printf "  [${YELLOW} WARN ${NC}] ${BOLD}%-22s${NC} : %b\n" "$label" "$detail" ;;
-        FAIL) printf "  [${RED} FAIL ${NC}] ${BOLD}%-22s${NC} : %b\n" "$label" "$detail" ;;
+        OK)   icon="●"; color="$GREEN"  ;;
+        WARN) icon="▲"; color="$YELLOW" ;;
+        FAIL) icon="✖"; color="$RED"    ;;
+        *)    icon="·"; color="$DIM"    ;;
     esac
+    [ "${#label}" -gt 21 ] && label="${label:0:20}…"
+    printf '  %b%s%b %b%s%b %b\n' \
+        "$color" "$icon" "$NC" "$BOLD" "$(pad_to "$label" 21)" "$NC" "$detail"
 }
 
 # Print an indented detail line, hard-truncated so it can never wrap.
@@ -475,24 +579,36 @@ print_detail() {
     printf '      %b%s%b\n' "$DIM" "$text" "$NC"
 }
 
+# Colour for a percentage: green <=50, yellow <=75, red above.
+pct_color() {
+    if   [ "$1" -gt 75 ]; then printf '%s' "$RED"
+    elif [ "$1" -gt 50 ]; then printf '%s' "$YELLOW"
+    else                       printf '%s' "$GREEN"; fi
+}
+
+# Adaptive bar. Widens on roomy terminals, shrinks on narrow ones.
 draw_progress_bar() {
     local pct=$1
-    local width=18
+    local width=${2:-0}
+
+    if [ "$width" -le 0 ]; then
+        width=$(( CONTENT_WIDTH - 52 ))
+        [ "$width" -gt 24 ] && width=24
+        [ "$width" -lt 8 ]  && width=8
+    fi
+
+    [ "$pct" -lt 0 ]   && pct=0
+    [ "$pct" -gt 100 ] && pct=100
+
     local filled=$(( pct * width / 100 ))
     local empty=$(( width - filled ))
-    local bar=""
+    local color
+    color=$(pct_color "$pct")
 
-    local color=$GREEN
-    if [ "$pct" -gt 50 ]; then color=$YELLOW; fi
-    if [ "$pct" -gt 75 ]; then color=$RED; fi
-
-    bar+="${color}"
-    for ((i=0; i<filled; i++)); do bar+="█"; done
-    bar+="${NC}${DIM}"
-    for ((i=0; i<empty; i++)); do bar+="░"; done
-    bar+="${NC}"
-
-    echo -e "[${bar}] ${pct}%"
+    printf '%b%s%b%b%s%b %b%3d%%%b' \
+        "$color" "$(repeat_char '█' "$filled")" "$NC" \
+        "$DIM"   "$(repeat_char '░' "$empty")"  "$NC" \
+        "$color" "$pct" "$NC"
 }
 
 # ==============================================================================
@@ -536,16 +652,34 @@ check_hardware() {
         fi
     fi
 
-    ram_total=$(free -m | awk '/^Mem:/{print $2}')
-    ram_used=$(free -m | awk '/^Mem:/{print $3}')
-    ram_total=${ram_total:-1}
+    # CPU utilisation (computed from the jiffy delta in update_cpu_usage)
+    print_status "CPU Usage" "$( [ "$CPU_USAGE_PCT" -gt 90 ] && echo WARN || echo OK )" \
+        "$(draw_progress_bar "$CPU_USAGE_PCT")"
+
+    # Single free(1) call feeds both memory and swap rows
+    local ram_total ram_used swap_total swap_used lbl tot used
+    while read -r lbl tot used _; do
+        case "$lbl" in
+            Mem:)  ram_total=$tot;  ram_used=$used  ;;
+            Swap:) swap_total=$tot; swap_used=$used ;;
+        esac
+    done < <(free -m 2>/dev/null | tail -n +2)
+
+    ram_total=${ram_total:-1}; ram_used=${ram_used:-0}
     ram_pct=$(( ram_used * 100 / ram_total ))
     ram_bar=$(draw_progress_bar "$ram_pct")
 
     if [ "$ram_pct" -lt "$RAM_LIMIT" ]; then
-        print_status "RAM Usage" "OK" "${ram_used}MB / ${ram_total}MB ${ram_bar}"
+        print_status "Memory" "OK" "$(printf '%5sM / %-6s' "$ram_used" "${ram_total}M") ${ram_bar}"
     else
-        print_status "RAM Usage" "WARN" "${ram_used}MB / ${ram_total}MB ${ram_bar} (High Memory Pressure)"
+        print_status "Memory" "WARN" "$(printf '%5sM / %-6s' "$ram_used" "${ram_total}M") ${ram_bar}"
+    fi
+
+    swap_total=${swap_total:-0}; swap_used=${swap_used:-0}
+    if [ "$swap_total" -gt 0 ]; then
+        local swap_pct=$(( swap_used * 100 / swap_total ))
+        print_status "Swap" "$( [ "$swap_pct" -gt 50 ] && echo WARN || echo OK )" \
+            "$(printf '%5sM / %-6s' "$swap_used" "${swap_total}M") $(draw_progress_bar "$swap_pct")"
     fi
 
     failed_units=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
@@ -1392,6 +1526,28 @@ check_webhook_alerts() {
 # THROUGHPUT STATE UPDATE (must run outside subshell)
 # ==============================================================================
 
+# Derive CPU utilisation from the jiffy delta since the previous frame.
+# Runs outside the render subshell so the running totals actually persist.
+update_cpu_usage() {
+    [ -f /proc/stat ] || return
+    local u n s idle iow irq sirq st
+    read -r _ u n s idle iow irq sirq st _ < /proc/stat
+    local total=$(( u + n + s + idle + iow + irq + sirq + st ))
+    local idle_all=$(( idle + iow ))
+
+    if [ "$_prev_cpu_total" -gt 0 ]; then
+        local dt=$(( total - _prev_cpu_total ))
+        local di=$(( idle_all - _prev_cpu_idle ))
+        if [ "$dt" -gt 0 ]; then
+            CPU_USAGE_PCT=$(( (dt - di) * 100 / dt ))
+            [ "$CPU_USAGE_PCT" -lt 0 ]   && CPU_USAGE_PCT=0
+            [ "$CPU_USAGE_PCT" -gt 100 ] && CPU_USAGE_PCT=100
+        fi
+    fi
+    _prev_cpu_total=$total
+    _prev_cpu_idle=$idle_all
+}
+
 update_throughput_state() {
     local main_iface
     main_iface=$(ip route 2>/dev/null | grep default | awk '{print $5}' | head -n1)
@@ -1441,6 +1597,10 @@ render_frame() {
         CONTENT_WIDTH=$(( current_cols - 1 ))
     fi
     [ "$CONTENT_WIDTH" -lt 40 ] && CONTENT_WIDTH=40
+
+    # Refresh derived counters before the buffer is built, so the subshell
+    # below reads current values (globals set inside it would not survive).
+    update_cpu_usage
 
     local buffer
     buffer=$(
