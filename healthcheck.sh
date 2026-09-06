@@ -23,7 +23,7 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.5.2"
+VERSION="1.6.0"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -439,6 +439,43 @@ _MB_PROBE="●"
 if [ ${#_MB_PROBE} -eq 1 ]; then _MB_BYTES=false; else _MB_BYTES=true; fi
 unset _MB_PROBE
 
+# Line count of a buffer, without forking wc.
+_nlines=0
+count_lines() {
+    if [ -z "$1" ]; then _nlines=0; return; fi
+    local t="${1//[!$'\n']/}"
+    _nlines=$(( ${#t} + 1 ))
+}
+
+# Paint a frame without ever emitting a newline.
+#
+# Newlines are what caused the old flicker and the missing header: once the
+# frame was taller than the terminal, every \n past the last row scrolled the
+# screen, discarding the top and forcing a full repaint each second. Absolute
+# cursor addressing (CUP) cannot scroll, so the top is always safe and any
+# overflow is simply clipped at the bottom instead.
+#
+# The whole frame is assembled into one string and written with a single
+# printf, so the terminal never shows a half-drawn frame.
+paint_frame() {
+    local buffer="$1" rows="$2"
+    local out="" row=0 line
+
+    while IFS= read -r line; do
+        [ "$row" -ge "$rows" ] && break
+        out+=$'\033['"$(( row + 1 ))"';1H'"${line}"$'\033[K'
+        row=$(( row + 1 ))
+    done <<< "$buffer"
+
+    # Blank any rows this frame no longer uses.
+    while [ "$row" -lt "$rows" ]; do
+        out+=$'\033['"$(( row + 1 ))"';1H'$'\033[K'
+        row=$(( row + 1 ))
+    done
+
+    printf '%s' "$out"
+}
+
 # Visible length of a string, ignoring ANSI SGR sequences.
 # Writes to the global _vislen instead of echoing, so callers avoid a fork
 # on every line — this runs hundreds of times per frame.
@@ -496,9 +533,52 @@ panel() {
     box_wrap "$title" "$content" "$w"
 }
 
+# --- Panel cache -------------------------------------------------------------
+# Several checks shell out to genuinely expensive tools (docker, smartctl, ss,
+# dig, journalctl, fail2ban-client). Re-running those every second is what made
+# CPU spike as soon as a panel was enabled. Each panel therefore declares a TTL
+# and its rendered output is reused until that expires.
+#
+# The result is written to _PANEL_OUT rather than echoed, so a cache hit costs
+# no fork at all. $SECONDS is a bash builtin, so the clock check is free too.
+declare -A _pcache _pcache_ts _pcache_w
+_PANEL_OUT=""
+
+render_panel() {
+    local key="$1" title="$2" fn="$3" w="$4" ttl="$5"
+
+    # Reuse only while fresh AND rendered at the current width, so a resize
+    # invalidates every panel.
+    if [ "$ttl" -gt 0 ] && [ -n "${_pcache[$key]:-}" ] && [ "${_pcache_w[$key]:-}" = "$w" ]; then
+        if [ $(( SECONDS - ${_pcache_ts[$key]:-0} )) -lt "$ttl" ]; then
+            _PANEL_OUT="${_pcache[$key]}"
+            return
+        fi
+    fi
+
+    _PANEL_OUT=$(panel "$title" "$fn" "$w")
+    _pcache[$key]="$_PANEL_OUT"
+    _pcache_ts[$key]=$SECONDS
+    _pcache_w[$key]="$w"
+}
+
+# Append a panel's output to a named buffer variable.
+# Uses indirect expansion + printf -v rather than a nameref, which would
+# require bash 4.3; the rest of the script only needs 4.0.
+add_panel() {
+    local bufvar="$1"; shift
+    render_panel "$@"
+    [ -z "$_PANEL_OUT" ] && return
+    local cur="${!bufvar}"
+    [ -n "$cur" ] && cur+=$'\n'
+    cur+="$_PANEL_OUT"
+    printf -v "$bufvar" '%s' "$cur"
+}
+
 # The analog clock as a boxed panel, art centred in the available width.
+# ry controls the size; see generate_clock.
 clock_panel() {
-    local w="$1"
+    local w="$1" ry="${2:-7}"
     local inner=$(( w - 3 ))
     local content
     content=$(
@@ -508,7 +588,7 @@ clock_panel() {
             left=$(( (inner - _vislen) / 2 ))
             [ "$left" -lt 0 ] && left=0
             printf '%*s%s\n' "$left" '' "$line"
-        done <<< "$(generate_clock)"
+        done <<< "$(generate_clock "$ry")"
     )
     box_wrap "CLOCK" "$content" "$w"
 }
@@ -1124,32 +1204,34 @@ check_docker() {
 
     print_status "Container Engine" "OK" "${CONTAINER_ENGINE}"
 
-    local running stopped unhealthy
-    running=$($CONTAINER_ENGINE ps -q 2>/dev/null | wc -l)
-    stopped=$($CONTAINER_ENGINE ps -aq --filter "status=exited" 2>/dev/null | wc -l)
-    unhealthy=$($CONTAINER_ENGINE ps --filter "health=unhealthy" -q 2>/dev/null | wc -l)
+    # One `ps -a` for every figure below. This used to be four separate docker
+    # invocations per refresh, which is a real cost: the docker CLI is not cheap
+    # to spawn and it was running every second.
+    local ps_out
+    ps_out=$($CONTAINER_ENGINE ps -a --format '{{.State}}|{{.Names}}|{{.Status}}' 2>/dev/null)
+
+    local running stopped unhealthy restarting
+    running=$(printf '%s\n' "$ps_out"   | grep -c '^running|')
+    stopped=$(printf '%s\n' "$ps_out"   | grep -c '^exited|')
+    restarting=$(printf '%s\n' "$ps_out" | grep -c '^restarting|')
+    unhealthy=$(printf '%s\n' "$ps_out" | grep -ci '(unhealthy)')
 
     local status="OK"
     [ "$unhealthy" -gt 0 ] && status="WARN"
     print_status "Containers" "$status" "Running: ${running}  Stopped: ${stopped}  Unhealthy: ${unhealthy}"
 
-    # Restart loops
-    local restarting
-    restarting=$($CONTAINER_ENGINE ps --filter "status=restarting" --format '{{.Names}}' 2>/dev/null | head -3)
-    if [ -n "$restarting" ]; then
-        print_status "Restart Loops" "FAIL" "$(echo "$restarting" | tr '\n' ' ')"
+    if [ "$restarting" -gt 0 ]; then
+        local names
+        names=$(printf '%s\n' "$ps_out" | awk -F'|' '$1=="restarting"{printf "%s ", $2}')
+        print_status "Restart Loops" "FAIL" "$names"
     fi
 
-    # Top 3 by memory (uses ps-based check, avoids slow docker stats)
     if [ "$running" -gt 0 ]; then
-        local top_containers
-        top_containers=$($CONTAINER_ENGINE ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | head -5)
-        if [ -n "$top_containers" ]; then
-            print_status "Running Containers" "OK" ""
-            echo "$top_containers" | while IFS=$'\t' read -r name status; do
-                print_detail "$(printf '%-25s %s' "$name" "$status")"
-            done
-        fi
+        print_status "Running Containers" "OK" ""
+        printf '%s\n' "$ps_out" | awk -F'|' '$1=="running"' | head -5 | \
+        while IFS='|' read -r _ name cstatus; do
+            print_detail "$(printf '%-25s %s' "$name" "$cstatus")"
+        done
     fi
     echo ""
 }
@@ -1335,9 +1417,13 @@ check_logs() {
         fi
     fi
 
-    if dmesg 2>/dev/null | grep -iqE "Out of memory|Killed process"; then
-        oom_target=$(dmesg | grep -iE "Killed process" | tail -n 1 | awk -F'Killed process' '{print $2}')
-        print_status "OOM Killer Events" "FAIL" "Process killed:${oom_target}"
+    # Single dmesg pass: the buffer can be large on a long-running host, and
+    # this used to scan it twice.
+    local oom_line
+    oom_line=$(dmesg 2>/dev/null | grep -iE "Out of memory|Killed process" | tail -n 1)
+    if [ -n "$oom_line" ]; then
+        oom_target=$(printf '%s' "$oom_line" | awk -F'Killed process' '{print $2}')
+        print_status "OOM Killer Events" "FAIL" "Process killed:${oom_target:- (see dmesg)}"
     else
         print_status "OOM Killer Events" "OK" "No kernel process kills recorded"
     fi
@@ -1365,8 +1451,13 @@ check_logs() {
 # ASCII ANALOG CLOCK
 # ==============================================================================
 
+# generate_clock [ry]
+# ry is the vertical radius in rows; rx is twice that, because terminal cells
+# are about half as wide as they are tall. Everything else derives from it, so
+# the clock can be shrunk to fit the terminal.
 generate_clock() {
-    date '+%H %M %S' | awk '
+    local ry="${1:-7}"
+    date '+%H %M %S' | awk -v RY="$ry" '
     function lch(dx, dy,    adx, ady, vdy) {
         adx = (dx >= 0) ? dx : -dx
         ady = (dy >= 0) ? dy : -dy
@@ -1381,9 +1472,9 @@ generate_clock() {
         min = $2 + 0
         sec = $3 + 0
 
-        W = 31; H = 21
-        cx = 15; cy = 9
-        rx = 14; ry = 7
+        ry = RY + 0; rx = ry * 2
+        W = 2 * rx + 3; H = 2 * ry + 3
+        cx = rx + 1; cy = ry + 1
         pi = atan2(0, -1)
 
         for (y = 0; y < H; y++)
@@ -1460,7 +1551,8 @@ generate_clock() {
             }
             print line
         }
-        printf "           %s%02d:%02d:%02d%s\n", bold, ($1+0), min, sec, nc
+        pad = int((W - 8) / 2); if (pad < 0) pad = 0
+        printf "%*s%s%02d:%02d:%02d%s\n", pad, "", bold, ($1+0), min, sec, nc
     }'
 }
 
@@ -1660,8 +1752,9 @@ update_throughput_state() {
 PREV_COLS=0
 
 render_frame() {
-    local cols
-    cols=$(tput cols 2>/dev/null) || cols=80
+    local cols rows
+    cols=$(tput cols 2>/dev/null)  || cols=80
+    rows=$(tput lines 2>/dev/null) || rows=24
     if [ "$cols" -ne "$PREV_COLS" ]; then
         clear
         PREV_COLS=$cols
@@ -1676,77 +1769,91 @@ render_frame() {
         pw=$(( (cols - 1) / 2 ))
     fi
 
-    # Refresh derived counters before the buffer is built, so the subshell
-    # below reads current values (globals set inside it would not survive).
+    # Refresh derived counters before any panel is rendered.
     update_cpu_usage
 
-    local buffer
-    buffer=$(
-        CONTENT_WIDTH=$cols
-        print_header
+    # --- Header (full width) -------------------------------------------------
+    local header
+    header=$( CONTENT_WIDTH=$cols; print_header 2>/dev/null )
 
-        # Panels are assigned to a fixed column so a toggle always opens on a
-        # predictable side:
-        #   LEFT   hardware, storage, network  + the d / s toggles
-        #   RIGHT  clock                       + the c / t / n toggles
-        #   BOTTOM security audit (a) and logs, full width
+    # --- Panels --------------------------------------------------------------
+    # Fixed columns, so a toggle always opens on a predictable side:
+    #   LEFT   hardware, storage, pi-hole, network + the d / s toggles
+    #   RIGHT  clock                              + the c / t / n toggles
+    #   BOTTOM security audit (a) and logs, full width
+    #
+    # TTLs keep the costly probes from re-running every second; see
+    # render_panel. Cheap, fast-moving panels stay at 0 (every frame).
+    local lbuf="" rbuf="" bbuf="" w=$pw
+    [ "$two_col" = true ] || w=$cols
+
+    add_panel lbuf HW "HARDWARE & THERMAL" check_hardware "$w" 0
+    if [ "$LESS_MODE" != true ]; then
+        add_panel lbuf STO "STORAGE & MOUNTS" check_storage "$w" 5
+        [ "$SHOW_STORAGE_PERF" = true ] && add_panel lbuf STOP "STORAGE PERFORMANCE" check_storage_performance "$w" 5
+    fi
+    [ "$PIHOLE_MODE" = true ] && add_panel lbuf PH "PI-HOLE v6 ENGINE" check_pihole_v6 "$w" 3
+    if [ "$LESS_MODE" != true ]; then
+        add_panel lbuf NET "NETWORK" check_network_security "$w" 3
+        [ "$SHOW_DOCKER" = true ] && add_panel lbuf DOCK "CONTAINERS" check_docker "$w" 5
+    fi
+
+    [ "$SHOW_CPU" = true ]     && add_panel rbuf CPU "CPU INFORMATION" check_cpu_info "$w" 2
+    [ "$SHOW_THERMAL" = true ] && add_panel rbuf THERM "THERMAL & SENSORS" check_thermal_expanded "$w" 10
+    if [ "$LESS_MODE" != true ] && [ "$SHOW_NETWORK" = true ]; then
+        add_panel rbuf NDIAG "NETWORK DIAGNOSTICS" check_network_diagnostics "$w" 3
+    fi
+
+    if [ "$LESS_MODE" != true ] && [ "$SHOW_SECURITY" = true ]; then
+        add_panel bbuf AUDIT "SECURITY AUDIT" check_security_audit "$cols" 15
+    fi
+    add_panel bbuf LOGS "LOGS & SYSTEM AUDIT STREAM" check_logs "$cols" 3
+
+    # --- Fit the clock into whatever vertical room is left -------------------
+    # The clock is the one element free to shrink, so it absorbs the overflow:
+    # full analog, then progressively smaller, then dropped entirely (the
+    # header's Time field still shows the clock digitally).
+    local hh lh rh bh budget avail
+    count_lines "$header"; hh=$_nlines
+    count_lines "$lbuf";   lh=$_nlines
+    count_lines "$rbuf";   rh=$_nlines
+    count_lines "$bbuf";   bh=$_nlines
+
+    if [ "$NO_COLOR" != true ]; then
         if [ "$two_col" = true ]; then
-            lbuf=$(
-                panel "HARDWARE & THERMAL" check_hardware "$pw"
-                if [ "$LESS_MODE" != true ]; then
-                    panel "STORAGE & MOUNTS" check_storage "$pw"
-                    [ "$SHOW_STORAGE_PERF" = true ] && panel "STORAGE PERFORMANCE" check_storage_performance "$pw"
-                fi
-                [ "$PIHOLE_MODE" = true ] && panel "PI-HOLE v6 ENGINE" check_pihole_v6 "$pw"
-                if [ "$LESS_MODE" != true ]; then
-                    panel "NETWORK" check_network_security "$pw"
-                    [ "$SHOW_DOCKER" = true ] && panel "CONTAINERS" check_docker "$pw"
-                fi
-                true
-            )
-            rbuf=$(
-                [ "$NO_COLOR" != true ] && clock_panel "$pw"
-                [ "$SHOW_CPU" = true ]     && panel "CPU INFORMATION" check_cpu_info "$pw"
-                [ "$SHOW_THERMAL" = true ] && panel "THERMAL & SENSORS" check_thermal_expanded "$pw"
-                if [ "$LESS_MODE" != true ]; then
-                    [ "$SHOW_NETWORK" = true ] && panel "NETWORK DIAGNOSTICS" check_network_diagnostics "$pw"
-                fi
-                true
-            )
-            compose_columns "$lbuf" "$rbuf" "$pw"
+            budget=$(( rows - hh - bh ))
+            avail=$(( budget - rh ))          # room above the right column
         else
-            [ "$NO_COLOR" != true ] && clock_panel "$cols"
-            panel "HARDWARE & THERMAL" check_hardware "$cols"
-            [ "$SHOW_CPU" = true ]     && panel "CPU INFORMATION" check_cpu_info "$cols"
-            [ "$SHOW_THERMAL" = true ] && panel "THERMAL & SENSORS" check_thermal_expanded "$cols"
-            if [ "$LESS_MODE" != true ]; then
-                panel "STORAGE & MOUNTS" check_storage "$cols"
-                [ "$SHOW_STORAGE_PERF" = true ] && panel "STORAGE PERFORMANCE" check_storage_performance "$cols"
-            fi
-            [ "$PIHOLE_MODE" = true ] && panel "PI-HOLE v6 ENGINE" check_pihole_v6 "$cols"
-            if [ "$LESS_MODE" != true ]; then
-                panel "NETWORK" check_network_security "$cols"
-                [ "$SHOW_NETWORK" = true ] && panel "NETWORK DIAGNOSTICS" check_network_diagnostics "$cols"
-                [ "$SHOW_DOCKER" = true ]  && panel "CONTAINERS" check_docker "$cols"
-            fi
+            avail=$(( rows - hh - bh - lh - rh ))
         fi
 
-        # Full width at the bottom: the audit table and the logs both carry
-        # long lines that would be cramped in a half-width column.
-        if [ "$LESS_MODE" != true ] && [ "$SHOW_SECURITY" = true ]; then
-            panel "SECURITY AUDIT" check_security_audit "$cols"
+        # Panel height for radius ry is 2*ry + 6 (art + digital line + borders).
+        local cry=0
+        if   [ "$avail" -ge 20 ]; then cry=7
+        elif [ "$avail" -ge 16 ]; then cry=5
+        elif [ "$avail" -ge 12 ]; then cry=3
         fi
-        panel "LOGS & SYSTEM AUDIT STREAM" check_logs "$cols"
-    )
 
-    # Paint line-by-line, erasing each row's tail (\033[K) so leftover text
-    # from a previous, longer frame cannot survive. %s avoids re-interpreting
-    # backslashes that appear in log content.
-    tput cup 0 0 2>/dev/null
-    while IFS= read -r line; do
-        printf '%s\033[K\n' "$line"
-    done <<< "$buffer"
-    printf '\033[J'
+        if [ "$cry" -gt 0 ]; then
+            local clk
+            clk=$(clock_panel "$w" "$cry")
+            if [ -n "$rbuf" ]; then rbuf="${clk}"$'\n'"${rbuf}"; else rbuf="$clk"; fi
+        fi
+    fi
+
+    # --- Compose -------------------------------------------------------------
+    local buffer
+    if [ "$two_col" = true ]; then
+        buffer="${header}"$'\n'"$(compose_columns "$lbuf" "$rbuf" "$pw")"
+    else
+        # Stacked: hardware and storage first, then the toggle panels.
+        buffer="${header}"
+        [ -n "$lbuf" ] && buffer+=$'\n'"${lbuf}"
+        [ -n "$rbuf" ] && buffer+=$'\n'"${rbuf}"
+    fi
+    [ -n "$bbuf" ] && buffer+=$'\n'"${bbuf}"
+
+    paint_frame "$buffer" "$rows"
 
     # Update throughput state after display (outside subshell)
     update_throughput_state

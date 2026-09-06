@@ -3,7 +3,7 @@
 Interactive top-style terminal dashboard for monitoring any Linux system. Supports **Pi-hole v6** monitoring out of the box, but works as a general-purpose system health tool on any distro.
 
 ![Bash](https://img.shields.io/badge/Bash-4+-green?logo=gnubash&logoColor=white)
-![Version](https://img.shields.io/badge/Version-1.5.2-orange)
+![Version](https://img.shields.io/badge/Version-1.6.0-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 ## Screenshots
@@ -20,11 +20,12 @@ Interactive top-style terminal dashboard for monitoring any Linux system. Suppor
 - **Fully adaptive layout** — header box, panels, and progress bars all resize to the terminal; nothing wraps or misaligns at any width
 - **Runs on any Linux distro** — auto-detects OS and displays a colored ASCII logo
 - **Regular & Pi-hole modes** — system-only monitoring or full Pi-hole dashboard, auto-detected and toggleable at runtime
-- **Flicker-free refresh** — redraws in-place like `top`/`btop`, no screen clearing (default: 1s)
+- **Flicker-free refresh** — the frame is painted with absolute cursor addressing in a single write, so it never scrolls, never tears, and the header is never lost (default: 1s)
+- **Cached probes** — expensive checks (docker, smartctl, ss, dig, journalctl) carry a TTL instead of re-running every second, keeping CPU use low
 - **Live CPU utilisation** — true CPU%, computed from `/proc/stat` jiffy deltas between frames
 - **Memory & swap gauges** — colored bars with used/total figures
 - **Active-panel hotkey legend** — enabled panels light up green in the key hints
-- **ASCII analog clock** — lines-only clock rendered as a panel at the top of the right column
+- **ASCII analog clock** — lines-only clock in the right column; shrinks automatically when vertical space is tight and drops to the header's digital time if there is no room at all
 - **Keyboard controls** — toggle views, modes, and panels without restarting
 - **Hardware monitoring** — CPU temperature, clock speed, throttling state, RAM usage
 - **CPU info panel** — model, cores, load average, governor, frequency range, top processes
