@@ -23,7 +23,7 @@
 #                                   a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.7.0"
+VERSION="1.8.0"
 # raw.githubusercontent.com sits behind a CDN with a 5 minute TTL that ignores
 # both cache-busting query strings and client no-cache headers, so a fresh
 # release reads as "already up to date". The API serves the current blob, so it
@@ -434,24 +434,6 @@ repeat_char() {
     printf '%s' "${out// /$ch}"
 }
 
-# Box borders: top / divider / bottom, sized to CONTENT_WIDTH.
-box_top()    { printf '%b╭%s╮%b\n' "$CYAN" "$(repeat_char '─' $(( CONTENT_WIDTH - 2 )))" "$NC"; }
-box_div()    { printf '%b├%s┤%b\n' "$CYAN" "$(repeat_char '─' $(( CONTENT_WIDTH - 2 )))" "$NC"; }
-box_bottom() { printf '%b╰%s╯%b\n' "$CYAN" "$(repeat_char '─' $(( CONTENT_WIDTH - 2 )))" "$NC"; }
-
-# Title row: "│ <title>            v1.4.0 │"
-# emoji_extra accounts for glyphs that occupy 2 cells but count as 1 character.
-box_title_row() {
-    local title="$1" emoji_extra="${2:-0}"
-    local inner=$(( CONTENT_WIDTH - 4 ))
-    local vlabel="v${VERSION}"
-    local pad=$(( inner - ${#title} - ${#vlabel} - emoji_extra ))
-    [ "$pad" -lt 1 ] && pad=1
-    printf '%b│%b %b%s%b%*s%b%s%b %b│%b\n' \
-        "$CYAN" "$NC" "${BOLD}${PURPLE}" "$title" "$NC" \
-        "$pad" '' "$DIM" "$vlabel" "$NC" "$CYAN" "$NC"
-}
-
 # Does ${#str} count bytes rather than characters? True under a non-UTF-8
 # locale (C/POSIX), which is the default on minimal Pi OS / Debian installs.
 # Probed once at startup rather than assumed.
@@ -496,6 +478,30 @@ paint_frame() {
     printf '%s' "$out"
 }
 
+# Strip ANSI SGR sequences from a string into the global _stripped.
+# Writes to a global rather than echoing so callers avoid a fork.
+_stripped=""
+strip_ansi_var() {
+    local s="$1" pre rest
+    # Real ESC bytes, as produced once printf %b has interpreted a colour var.
+    while [[ "$s" == *$'\033['* ]]; do
+        pre="${s%%$'\033['*}"
+        rest="${s#*$'\033['}"
+        rest="${rest#*m}"
+        s="${pre}${rest}"
+    done
+    # The uninterpreted literal form: the colour variables are single-quoted
+    # ('\033[0;32m'), so a string built from them holds the escape as plain
+    # text until printf %b renders it. Both forms must measure as zero width.
+    while [[ "$s" == *'\033['* ]]; do
+        pre="${s%%'\033['*}"
+        rest="${s#*'\033['}"
+        rest="${rest#*m}"
+        s="${pre}${rest}"
+    done
+    _stripped="$s"
+}
+
 # Visible length of a string, ignoring ANSI SGR sequences.
 # Writes to the global _vislen instead of echoing, so callers avoid a fork
 # on every line — this runs hundreds of times per frame.
@@ -508,6 +514,13 @@ vis_len() {
         rest="${rest#*m}"
         s="${pre}${rest}"
     done
+    # Also the uninterpreted literal form; see strip_ansi_var.
+    while [[ "$s" == *'\033['* ]]; do
+        pre="${s%%'\033['*}"
+        rest="${s#*'\033['}"
+        rest="${rest#*m}"
+        s="${pre}${rest}"
+    done
     # In byte-counting mode, drop UTF-8 continuation bytes (0x80-0xBF). What
     # remains is exactly one byte per character, so ${#s} becomes the column
     # count. Every glyph this script draws is single-width.
@@ -517,40 +530,42 @@ vis_len() {
     _vislen=${#s}
 }
 
-# Wrap pre-rendered content in a titled box exactly w columns wide.
-#   ╭─ TITLE ──────────╮
-#   │ content          │
-#   ╰──────────────────╯
-box_wrap() {
-    local title="$1" content="$2" w="$3"
-    local inner=$(( w - 3 ))
-    local tfill=$(( w - 5 - ${#title} ))
-    [ "$tfill" -lt 0 ] && tfill=0
-
-    printf '%b╭─ %b%s%b %b%s╮%b\n' \
-        "$CYAN" "${BOLD}${BLUE}" "$title" "$NC" \
-        "$CYAN" "$(repeat_char '─' "$tfill")" "$NC"
-
-    local line pad
-    while IFS= read -r line; do
-        vis_len "$line"
-        pad=$(( inner - _vislen ))
-        [ "$pad" -lt 0 ] && pad=0
-        printf '%b│%b %s%*s%b│%b\n' "$CYAN" "$NC" "$line" "$pad" '' "$CYAN" "$NC"
-    done <<< "$content"
-
-    printf '%b╰%s╯%b\n' "$CYAN" "$(repeat_char '─' $(( w - 2 )))" "$NC"
+# Section heading: "MOUNTS ─────────────────" with an optional right-hand tag.
+# Two rows lighter per section than a box, which is where this layout gets its
+# density back.
+section_head() {
+    local title="$1" w="$2" tag="${3:-}"
+    local taglen=0
+    if [ -n "$tag" ]; then
+        strip_ansi_var "$tag"; vis_len "$_stripped"; taglen=$(( _vislen + 1 ))
+    fi
+    local fill=$(( w - ${#title} - 1 - taglen ))
+    [ "$fill" -lt 0 ] && fill=0
+    if [ -n "$tag" ]; then
+        printf '%b%s%b %b%s%b %b\n' \
+            "${BOLD}${BLUE}" "$title" "$NC" "$DIM" "$(repeat_char '─' "$fill")" "$NC" "$tag"
+    else
+        printf '%b%s%b %b%s%b\n' \
+            "${BOLD}${BLUE}" "$title" "$NC" "$DIM" "$(repeat_char '─' "$fill")" "$NC"
+    fi
 }
 
-# Run a check function inside a box, sizing its content to the panel.
+# A section is its heading followed by the check's rows — no border, no padding.
+section_wrap() {
+    local title="$1" content="$2" w="$3"
+    section_head "$title" "$w"
+    [ -n "$content" ] && printf '%s\n' "$content"
+}
+
+# Run a check function under a section heading, sizing its rows to the column.
 # stderr is discarded: it would bypass this capture and print straight to the
 # terminal, tearing a hole in the frame. Diagnosing a probe is not worth
 # corrupting the display, and every check already reports its own failures.
 panel() {
     local title="$1" fn="$2" w="$3"
     local content
-    content=$( CONTENT_WIDTH=$(( w - 3 )); "$fn" 2>/dev/null )
-    box_wrap "$title" "$content" "$w"
+    content=$( CONTENT_WIDTH=$w; "$fn" 2>/dev/null )
+    section_wrap "$title" "$content" "$w"
 }
 
 # --- Panel cache -------------------------------------------------------------
@@ -561,8 +576,11 @@ panel() {
 #
 # The result is written to _PANEL_OUT rather than echoed, so a cache hit costs
 # no fork at all. $SECONDS is a bash builtin, so the clock check is free too.
-declare -A _pcache _pcache_ts _pcache_w
+declare -A _pcache _pcache_ts _pcache_w _pwarn
 _PANEL_OUT=""
+_PANEL_WARN=""
+_WARN_FILE=""
+_WARN_SCRATCH=""
 
 render_panel() {
     local key="$1" title="$2" fn="$3" w="$4" ttl="$5"
@@ -573,14 +591,52 @@ render_panel() {
     if [ "$ttl" -gt 0 ] && [ -n "${_pcache[$key]:-}" ] && [ "${_pcache_w[$key]:-}" = "$sig" ]; then
         if [ $(( SECONDS - ${_pcache_ts[$key]:-0} )) -lt "$ttl" ]; then
             _PANEL_OUT="${_pcache[$key]}"
+            # Warnings ride with the cached body; otherwise a cached panel's
+            # problems would vanish from the roll-up until its TTL expired.
+            _PANEL_WARN="${_pwarn[$key]:-}"
             return
         fi
     fi
 
-    _PANEL_OUT=$(panel "$title" "$fn" "$w")
+    _PANEL_WARN=""
+    if [ -n "$_WARN_SCRATCH" ]; then
+        : > "$_WARN_SCRATCH" 2>/dev/null
+        _PANEL_OUT=$( _WARN_FILE="$_WARN_SCRATCH"; panel "$title" "$fn" "$w" )
+        _PANEL_WARN=$(cat "$_WARN_SCRATCH" 2>/dev/null)
+    else
+        _PANEL_OUT=$(panel "$title" "$fn" "$w")
+    fi
+
     _pcache[$key]="$_PANEL_OUT"
+    _pwarn[$key]="$_PANEL_WARN"
     _pcache_ts[$key]=$SECONDS
     _pcache_w[$key]="$sig"
+}
+
+# Render the NEEDS ATTENTION roll-up from collected "status<TAB>label<TAB>detail"
+# lines. Prints nothing when everything is healthy.
+build_attention() {
+    local warns="$1" w="$2"
+    [ -z "$warns" ] && return
+
+    local count=0 line
+    while IFS= read -r line; do
+        [ -n "$line" ] && count=$(( count + 1 ))
+    done <<< "$warns"
+    [ "$count" -eq 0 ] && return
+
+    section_head "NEEDS ATTENTION" "$w" "${YELLOW}${count}${NC}"
+
+    local st lbl det icon color
+    while IFS=$'\t' read -r st lbl det; do
+        [ -z "$st" ] && continue
+        if [ "$st" = FAIL ]; then icon="✖"; color="$RED"; else icon="▲"; color="$YELLOW"; fi
+        vis_len "$lbl"
+        local lpad=$(( 20 - _vislen ))
+        [ "$lpad" -lt 0 ] && lpad=0
+        printf ' %b%s%b %b%s%*s%b %s\n' \
+            "$color" "$icon" "$NC" "$color" "$lbl" "$lpad" '' "$NC" "$det"
+    done <<< "$warns"
 }
 
 # Append a panel's output to a named buffer variable.
@@ -589,6 +645,7 @@ render_panel() {
 add_panel() {
     local bufvar="$1"; shift
     render_panel "$@"
+    [ -n "$_PANEL_WARN" ] && _WARNS+="${_PANEL_WARN}"$'\n'
     [ -z "$_PANEL_OUT" ] && return
     local cur="${!bufvar}"
     [ -n "$cur" ] && cur+=$'\n'
@@ -596,22 +653,21 @@ add_panel() {
     printf -v "$bufvar" '%s' "$cur"
 }
 
-# The analog clock as a boxed panel, art centred in the available width.
+# The analog clock as a section, art centred in the available width.
 # ry controls the size; see generate_clock.
 clock_panel() {
     local w="$1" ry="${2:-7}"
-    local inner=$(( w - 3 ))
     local content
     content=$(
         local line left
         while IFS= read -r line; do
             vis_len "$line"
-            left=$(( (inner - _vislen) / 2 ))
+            left=$(( (w - _vislen) / 2 ))
             [ "$left" -lt 0 ] && left=0
             printf '%*s%s\n' "$left" '' "$line"
         done <<< "$(generate_clock "$ry")"
     )
-    box_wrap "CLOCK" "$content" "$w"
+    section_wrap "CLOCK" "$content" "$w"
 }
 
 # A run of spaces to slice padding from, so padding costs no fork.
@@ -661,38 +717,6 @@ compose_n() {
     printf '%s\n' "${O[@]}"
 }
 
-# Pad a string to N display columns.
-# Measures with vis_len rather than printf's %-*s, which pads by BYTES and so
-# misaligns any cell containing multi-byte UTF-8.
-pad_to() {
-    local s="$1" w="$2"
-    vis_len "$s"
-    local n=$(( w - _vislen ))
-    [ "$n" -gt 0 ] && s+=$(printf '%*s' "$n" '')
-    printf '%s' "$s"
-}
-
-# Two-column key/value row inside the box. Padding is computed on plain text,
-# then the 8-char label prefix of each cell is dimmed.
-box_kv_row() {
-    local l1="$1" v1="$2" l2="$3" v2="$4"
-    local inner=$(( CONTENT_WIDTH - 4 ))
-    local lw=$(( inner / 2 ))
-    local rw=$(( inner - lw ))
-
-    local lcell rcell
-    lcell="$(pad_to "$l1" 8)${v1}"
-    rcell="$(pad_to "$l2" 8)${v2}"
-    lcell=$(pad_to "${lcell:0:$lw}" "$lw")
-    rcell=$(pad_to "${rcell:0:$rw}" "$rw")
-
-    printf '%b│%b %b%s%b%s%b%s%b%s %b│%b\n' \
-        "$CYAN" "$NC" \
-        "$DIM" "${lcell:0:8}" "$NC" "${lcell:8}" \
-        "$DIM" "${rcell:0:8}" "$NC" "${rcell:8}" \
-        "$CYAN" "$NC"
-}
-
 # Compact uptime: "25d 8h 15m" rather than "3 weeks, 4 days, 8 hours...".
 fmt_uptime() {
     [ -f /proc/uptime ] || { uptime -p 2>/dev/null | sed 's/up //'; return; }
@@ -704,54 +728,75 @@ fmt_uptime() {
     else                      printf '%dm' "$m"; fi
 }
 
-# The header without the OS logo. Kept separate so the layout engine can drop
-# the logo (worth ~8 rows) when the frame would not otherwise fit.
+# Dense header: identity on one line, live vitals on the next, then a rule.
+# Kept separate from the OS logo so the layout engine can drop the logo
+# (worth ~8 rows) when the frame would not otherwise fit.
 print_header_body() {
-    local title emoji_extra
-    if [ "$LESS_MODE" = true ]; then
-        if [ "$PIHOLE_MODE" = true ]; then
-            title="🍓 LIVE LOG & EVENT MONITOR (Pi-hole v6)"; emoji_extra=1
-        else
-            title="📋 LIVE LOG & EVENT MONITOR"; emoji_extra=1
-        fi
-    else
-        if [ "$PIHOLE_MODE" = true ]; then
-            title="🍓 PI-HOLE v6 & SYSTEM DASHBOARD"; emoji_extra=1
-        else
-            title="🖥  SYSTEM HEALTH DASHBOARD"; emoji_extra=1
-        fi
-    fi
+    local w=${CONTENT_WIDTH:-80}
+    local loadavg scope
+    loadavg=$(awk '{printf "%s %s %s", $1, $2, $3}' /proc/loadavg 2>/dev/null)
+    if [ "$PIHOLE_MODE" = true ]; then scope="${PURPLE}pi-hole${NC}"; else scope="${CYAN}system${NC}"; fi
 
-    # Keep box-cell content ASCII: cells are padded by character count, and a
-    # multi-byte separator here would shift the right-hand border.
-    local loadavg
-    loadavg=$(awk '{printf "%s  %s  %s", $1, $2, $3}' /proc/loadavg 2>/dev/null)
+    # Line 1: who and what, with the clock on the right.
+    local left right
+    left=$(printf '%b%s%b  %b%s · %s · up %s%b' \
+        "${BOLD}${PURPLE}" "$(hostname)" "$NC" \
+        "$DIM" "${OS_NAME:-Linux}" "$(uname -r)" "$(fmt_uptime)" "$NC")
+    right=$(printf '%bload%b %s  %b·%b  %b%s%b  %b·%b  %bv%s%b' \
+        "$DIM" "$NC" "${loadavg:-n/a}" \
+        "$DIM" "$NC" "$BOLD" "$(date '+%H:%M:%S')" "$NC" \
+        "$DIM" "$NC" "$DIM" "$VERSION" "$NC")
+    strip_ansi_var "$left";  vis_len "$_stripped"; local llen=$_vislen
+    strip_ansi_var "$right"; vis_len "$_stripped"; local rlen=$_vislen
+    local gap=$(( w - llen - rlen ))
+    [ "$gap" -lt 1 ] && gap=1
+    printf '%s%*s%s\n' "$left" "$gap" '' "$right"
 
-    box_top
-    box_title_row "$title" "$emoji_extra"
-    box_div
-    box_kv_row "Host" "$(hostname)"                  "Uptime" "$(fmt_uptime)"
-    box_kv_row "OS"   "${OS_NAME:-Linux}"            "Kernel" "$(uname -r)"
-    box_kv_row "Time" "$(date '+%Y-%m-%d %H:%M:%S')" "Load"   "${loadavg:-n/a}"
-    box_bottom
+    # Line 2: the three vitals that move every second, side by side.
+    print_vitals_strip "$w"
 
-    # Status strip: current view / scope / interval, then the hotkey legend.
-    local view_label scope_label
-    if [ "$LESS_MODE" = true ]; then view_label="${YELLOW}LOG-ONLY${NC}"; else view_label="${GREEN}FULL${NC}"; fi
-    if [ "$PIHOLE_MODE" = true ]; then scope_label="${PURPLE}PIHOLE${NC}"; else scope_label="${CYAN}SYSTEM${NC}"; fi
+    printf '%b%s%b\n' "$DIM" "$(repeat_char '─' "$w")" "$NC"
 
-    printf ' %b %b %b %b %b%bs%b\n' \
-        "$view_label" "${DIM}·${NC}" "$scope_label" "${DIM}·${NC}" "${BOLD}${REFRESH}" "$DIM" "$NC"
-
-    # Hotkey legend, marking which toggle panels are currently on.
-    # No refresh key: the frame already redraws every interval.
+    # Line 3: mode and hotkeys. No refresh key -- the frame already redraws.
+    local view_label
+    if [ "$LESS_MODE" = true ]; then view_label="${YELLOW}log-only${NC}"; else view_label="${GREEN}full${NC}"; fi
     local keys=""
     keys+="$(hotkey q uit off)  "
     keys+="$(hotkey l og "$LESS_MODE")  $(hotkey c pu "$SHOW_CPU")  "
     keys+="$(hotkey p ihole "$PIHOLE_MODE")  $(hotkey d ocker "$SHOW_DOCKER")  "
     keys+="$(hotkey n et "$SHOW_NETWORK")  $(hotkey s torage "$SHOW_STORAGE_PERF")  "
     keys+="$(hotkey t hermal "$SHOW_THERMAL")  $(hotkey a udit "$SHOW_SECURITY")"
-    printf ' %b\n\n' "$keys"
+    printf '%b %b·%b %b  %b\n\n' "$view_label" "$DIM" "$NC" "$scope" "$keys"
+}
+
+# CPU / memory / swap as three inline gauges across the full width.
+print_vitals_strip() {
+    local w="$1"
+    local cell=$(( (w - 4) / 3 ))
+    local barw=$(( cell - 18 ))
+    [ "$barw" -lt 6 ]  && barw=6
+    [ "$barw" -gt 22 ] && barw=22
+
+    local ram_total ram_used swap_total swap_used lbl tot used
+    while read -r lbl tot used _; do
+        case "$lbl" in
+            Mem:)  ram_total=$tot;  ram_used=$used  ;;
+            Swap:) swap_total=$tot; swap_used=$used ;;
+        esac
+    done < <(free -m 2>/dev/null | tail -n +2)
+    ram_total=${ram_total:-1}; ram_used=${ram_used:-0}
+    swap_total=${swap_total:-0}; swap_used=${swap_used:-0}
+
+    local ram_pct=$(( ram_used * 100 / ram_total ))
+    local swap_pct=0
+    [ "$swap_total" -gt 0 ] && swap_pct=$(( swap_used * 100 / swap_total ))
+
+    printf ' %bcpu%b %s   %bmem%b %s %b%s/%sM%b   %bswp%b %s %b%sM%b\n' \
+        "$DIM" "$NC" "$(draw_progress_bar "$CPU_USAGE_PCT" "$barw")" \
+        "$DIM" "$NC" "$(draw_progress_bar "$ram_pct" "$barw")" \
+        "$DIM" "$ram_used" "$ram_total" "$NC" \
+        "$DIM" "$NC" "$(draw_progress_bar "$swap_pct" "$barw")" \
+        "$DIM" "$swap_used" "$NC"
 }
 
 # Render one hotkey hint.
@@ -766,9 +811,13 @@ hotkey() {
     fi
 }
 
-# Status line: "  ● Label                value"
+# Status line: " ● Label              value"
 # Labels are truncated to the column width so a long mount path cannot shove
 # the value column out of alignment.
+#
+# Anything not OK is also appended to $_WARN_FILE, which feeds the NEEDS
+# ATTENTION roll-up at the top of the frame. A file is used because each check
+# renders inside its own subshell, so a global set here would not survive.
 print_status() {
     local label="$1" status="$2" detail="$3"
     local icon color
@@ -778,14 +827,20 @@ print_status() {
         FAIL) icon="✖"; color="$RED"    ;;
         *)    icon="·"; color="$DIM"    ;;
     esac
+
+    if [ -n "$_WARN_FILE" ] && { [ "$status" = WARN ] || [ "$status" = FAIL ]; }; then
+        strip_ansi_var "$detail"
+        printf '%s\t%s\t%s\n' "$status" "$label" "$_stripped" >> "$_WARN_FILE" 2>/dev/null
+    fi
+
     vis_len "$label"
-    if [ "$_vislen" -gt 21 ]; then
-        label="${label:0:20}…"
+    if [ "$_vislen" -gt 20 ]; then
+        label="${label:0:19}…"
         vis_len "$label"
     fi
-    local lpad=$(( 21 - _vislen ))
+    local lpad=$(( 20 - _vislen ))
     [ "$lpad" -lt 0 ] && lpad=0
-    printf '  %b%s%b %b%s%*s%b %b\n' \
+    printf ' %b%s%b %b%s%*s%b %b\n' \
         "$color" "$icon" "$NC" "$BOLD" "$label" "$lpad" '' "$NC" "$detail"
 }
 
@@ -876,34 +931,20 @@ check_hardware() {
         fi
     fi
 
-    # CPU utilisation (computed from the jiffy delta in update_cpu_usage)
-    print_status "CPU Usage" "$( [ "$CPU_USAGE_PCT" -gt 90 ] && echo WARN || echo OK )" \
-        "$(draw_progress_bar "$CPU_USAGE_PCT")"
-
-    # Single free(1) call feeds both memory and swap rows
-    local ram_total ram_used swap_total swap_used lbl tot used
+    # CPU, memory and swap are drawn in the header's vitals strip; repeating
+    # them here would spend four rows on the same three numbers. Memory still
+    # raises a warning so it reaches the NEEDS ATTENTION roll-up.
+    local ram_total ram_used lbl tot used
     while read -r lbl tot used _; do
-        case "$lbl" in
-            Mem:)  ram_total=$tot;  ram_used=$used  ;;
-            Swap:) swap_total=$tot; swap_used=$used ;;
-        esac
+        case "$lbl" in Mem:) ram_total=$tot; ram_used=$used ;; esac
     done < <(free -m 2>/dev/null | tail -n +2)
-
     ram_total=${ram_total:-1}; ram_used=${ram_used:-0}
-    ram_pct=$(( ram_used * 100 / ram_total ))
-    ram_bar=$(draw_progress_bar "$ram_pct")
-
-    if [ "$ram_pct" -lt "$RAM_LIMIT" ]; then
-        print_status "Memory" "OK" "$(printf '%5sM / %-6s' "$ram_used" "${ram_total}M") ${ram_bar}"
-    else
-        print_status "Memory" "WARN" "$(printf '%5sM / %-6s' "$ram_used" "${ram_total}M") ${ram_bar}"
+    local ram_pct=$(( ram_used * 100 / ram_total ))
+    if [ "$ram_pct" -ge "$RAM_LIMIT" ]; then
+        print_status "Memory" "WARN" "${ram_pct}% used (${ram_used}M of ${ram_total}M)"
     fi
-
-    swap_total=${swap_total:-0}; swap_used=${swap_used:-0}
-    if [ "$swap_total" -gt 0 ]; then
-        local swap_pct=$(( swap_used * 100 / swap_total ))
-        print_status "Swap" "$( [ "$swap_pct" -gt 50 ] && echo WARN || echo OK )" \
-            "$(printf '%5sM / %-6s' "$swap_used" "${swap_total}M") $(draw_progress_bar "$swap_pct")"
+    if [ "$CPU_USAGE_PCT" -gt 90 ]; then
+        print_status "CPU Usage" "WARN" "${CPU_USAGE_PCT}% sustained"
     fi
 
     failed_units=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
@@ -1851,6 +1892,7 @@ render_frame() {
     # TTLs keep costly probes from re-running every second; see render_panel.
     _collect() {
         render_panel "$1" "$2" "$3" "$cw" "$4"
+        [ -n "$_PANEL_WARN" ] && _WARNS+="${_PANEL_WARN}"$'\n'
         [ -z "$_PANEL_OUT" ] && return
         _BODY+=("$_PANEL_OUT")
         count_lines "$_PANEL_OUT"
@@ -1858,7 +1900,7 @@ render_frame() {
     }
 
     collect_all() {
-        _BODY=(); _HEIGHT=()
+        _BODY=(); _HEIGHT=(); _WARNS=""
         _collect HW "HARDWARE & THERMAL" check_hardware 0
         [ "$SHOW_CPU" = true ]     && _collect CPU "CPU INFORMATION" check_cpu_info 2
         [ "$SHOW_THERMAL" = true ] && _collect THERM "THERMAL & SENSORS" check_thermal_expanded 10
@@ -1887,19 +1929,26 @@ render_frame() {
     #   logo on -> off            (worth ~8 rows)
     # Both list lengths stay cached, so settling on one costs nothing per frame.
     local try_ll try_logo try_ry chosen_logo=1 fitted=false bh budget
+    local attn="" ah=0
     for try_ll in 5 3 2; do
         LIST_LIMIT=$try_ll
         collect_all
         bbuf=""
         add_panel bbuf LOGS "LOGS & SYSTEM AUDIT STREAM" check_logs "$cols" 3
         count_lines "$bbuf"; bh=$_nlines
+
+        # Everything not OK, gathered from every check that ran this pass.
+        attn=$(build_attention "$_WARNS" "$cols")
+        count_lines "$attn"; ah=$_nlines
+        [ -n "$attn" ] && ah=$(( ah + 1 ))   # blank line after the block
+
         local n_fixed=${#_BODY[@]}
 
         for try_logo in 1 0; do
             for try_ry in 7 5 3 0; do
                 [ "$NO_COLOR" = true ] && [ "$try_ry" -gt 0 ] && continue
 
-                local head_h=$hdr_h
+                local head_h=$(( hdr_h + ah ))
                 [ "$try_logo" -eq 1 ] && head_h=$(( head_h + lh ))
                 budget=$(( rows - head_h - bh ))
 
@@ -1926,9 +1975,11 @@ render_frame() {
     [ "$fitted" = true ] || chosen_logo=0
 
     # --- Compose -------------------------------------------------------------
+    # Order: logo, header, what needs attention, the sections, then the logs.
     local buffer=""
     [ "$chosen_logo" -eq 1 ] && buffer+="${logo}"$'\n'
     buffer+="${hdr_body}"
+    [ -n "$attn" ] && buffer+="${attn}"$'\n\n'
     local body
     body=$(compose_n "$cw" "${_COLBUF[@]}")
     [ -n "$body" ] && buffer+=$'\n'"${body}"
@@ -1957,10 +2008,15 @@ if [ "$JSON_MODE" = true ]; then
     exit 0
 fi
 
+# Scratch file the checks append their WARN/FAIL lines to; see print_status.
+# Checks render in subshells, so a shared file is how their findings get back.
+_WARN_SCRATCH=$(mktemp 2>/dev/null) || _WARN_SCRATCH=""
+
 # --- One-shot mode ---
 if [ "$ONESHOT" = true ]; then
     clear
     render_frame
+    [ -n "$_WARN_SCRATCH" ] && rm -f "$_WARN_SCRATCH"
     exit 0
 fi
 
@@ -1976,6 +2032,7 @@ cleanup() {
     tput cnorm 2>/dev/null
     [ "$ALTSCREEN" = true ] && tput rmcup 2>/dev/null
     stty echo 2>/dev/null
+    [ -n "$_WARN_SCRATCH" ] && rm -f "$_WARN_SCRATCH"
     echo -e "\n${DIM}Dashboard stopped.${NC}"
     exit 0
 }

@@ -3,7 +3,7 @@
 Interactive top-style terminal dashboard for monitoring any Linux system. Supports **Pi-hole v6** monitoring out of the box, but works as a general-purpose system health tool on any distro.
 
 ![Bash](https://img.shields.io/badge/Bash-4+-green?logo=gnubash&logoColor=white)
-![Version](https://img.shields.io/badge/Version-1.7.0-orange)
+![Version](https://img.shields.io/badge/Version-1.8.0-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 ## Screenshots
@@ -16,7 +16,8 @@ Interactive top-style terminal dashboard for monitoring any Linux system. Suppor
 
 ## Features
 
-- **Dynamic boxed layout** — every section is its own bordered panel, placed into whichever column has room rather than a fixed side; up to three columns on wide terminals (≥192 cols), two at ≥128, one below that
+- **Needs Attention roll-up** — every warning and failure across all checks is gathered into one block at the top, with a count; you see what is wrong without reading the whole screen
+- **Dense layout** — sections are a heading plus a hairline rule rather than a box, which is two rows lighter each; panels are placed into whichever column has room rather than a fixed side, across up to three columns on wide terminals (≥192 cols), two at ≥128, one below that
 - **Fits the screen** — the layout searches for a configuration that fits: shorter list sections, then a smaller clock, then dropping the clock, then dropping the OS logo
 - **Fully adaptive layout** — header box, panels, and progress bars all resize to the terminal; nothing wraps or misaligns at any width
 - **Runs on any Linux distro** — auto-detects OS and displays a colored ASCII logo
@@ -24,7 +25,7 @@ Interactive top-style terminal dashboard for monitoring any Linux system. Suppor
 - **Flicker-free refresh** — the frame is painted with absolute cursor addressing in a single write, so it never scrolls, never tears, and the header is never lost (default: 1s)
 - **Cached probes** — expensive checks (docker, smartctl, ss, dig, journalctl) carry a TTL instead of re-running every second, keeping CPU use low
 - **Live CPU utilisation** — true CPU%, computed from `/proc/stat` jiffy deltas between frames
-- **Memory & swap gauges** — colored bars with used/total figures
+- **Vitals strip** — CPU, memory and swap as live gauges in the header, so the numbers that move every second are always in the same place
 - **Active-panel hotkey legend** — enabled panels light up green in the key hints
 - **ASCII analog clock** — lines-only clock in the right column; shrinks automatically when vertical space is tight and drops to the header's digital time if there is no room at all
 - **Keyboard controls** — toggle views, modes, and panels without restarting
