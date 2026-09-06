@@ -51,25 +51,43 @@ Auto-detected via `/etc/os-release` with colored ASCII logos for:
 
 Raspberry Pi OS, Debian, Ubuntu, Linux Mint, Pop!_OS, Arch, Manjaro, EndeavourOS, Fedora, CentOS, RHEL, Rocky, Alma, Alpine, Kali, Gentoo, Void, openSUSE/SLES — with a Tux penguin fallback for unrecognized distros.
 
-## Quick Start
+## Install
+
+Install to your `PATH` in one line:
 
 ```bash
-# Copy to your machine
-scp healthcheck.sh user@<ip>:~/
+curl -fsSL https://raw.githubusercontent.com/adaflos/healthcheck/master/healthcheck.sh | sudo tee /usr/local/bin/healthcheck >/dev/null && sudo chmod +x /usr/local/bin/healthcheck
+```
 
-# Make executable and run
+Then run it from anywhere:
+
+```bash
+healthcheck
+```
+
+Prefer to read the script before running it as root? Download it first:
+
+```bash
+curl -fsSL -O https://raw.githubusercontent.com/adaflos/healthcheck/master/healthcheck.sh
+less healthcheck.sh
+sudo install -m 755 healthcheck.sh /usr/local/bin/healthcheck
+```
+
+### Run without installing
+
+```bash
+curl -fsSL -O https://raw.githubusercontent.com/adaflos/healthcheck/master/healthcheck.sh
 chmod +x healthcheck.sh
 ./healthcheck.sh
 ```
 
-## Install System-Wide
+### Keeping it current
 
 ```bash
-sudo cp healthcheck.sh /usr/local/bin/healthcheck
-sudo chmod +x /usr/local/bin/healthcheck
+healthcheck -u
 ```
 
-After installing, run `healthcheck -u` anytime to update to the latest version from GitHub.
+Checks GitHub and installs the newer version if there is one. It queries the API rather than the raw file, so a release is picked up immediately instead of waiting out the CDN cache.
 
 ## Usage
 
