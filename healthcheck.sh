@@ -23,7 +23,7 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.6.0"
+VERSION="1.6.1"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -706,7 +706,7 @@ print_header() {
 
     # Hotkey legend, marking which toggle panels are currently on.
     local keys=""
-    keys+="$(hotkey q quit off)  $(hotkey r efresh off)  "
+    keys+="$(hotkey q uit off)  $(hotkey r efresh off)  "
     keys+="$(hotkey l og "$LESS_MODE")  $(hotkey c pu "$SHOW_CPU")  "
     keys+="$(hotkey p ihole "$PIHOLE_MODE")  $(hotkey d ocker "$SHOW_DOCKER")  "
     keys+="$(hotkey n et "$SHOW_NETWORK")  $(hotkey s torage "$SHOW_STORAGE_PERF")  "
@@ -714,13 +714,15 @@ print_header() {
     printf ' %b\n\n' "$keys"
 }
 
-# Render one hotkey hint; highlights the key when its panel is active.
+# Render one hotkey hint.
+# Active toggles are green so enabled panels are readable at a glance;
+# inactive ones stay plain white rather than dim, which was hard to read.
 hotkey() {
     local key="$1" rest="$2" active="$3"
     if [ "$active" = true ]; then
-        printf '%b%s%b%b%s%b' "${BOLD}${GREEN}" "$key" "$NC" "$GREEN" "$rest" "$NC"
+        printf '%b%s%s%b' "${BOLD}${GREEN}" "$key" "$rest" "$NC"
     else
-        printf '%b%s%b%b%s%b' "$BOLD" "$key" "$NC" "$DIM" "$rest" "$NC"
+        printf '%b%s%b%s%b' "$BOLD" "$key" "$NC" "$rest" "$NC"
     fi
 }
 
