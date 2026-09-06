@@ -23,7 +23,7 @@
 #                                   a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.9.1"
+VERSION="1.9.2"
 # raw.githubusercontent.com sits behind a CDN with a 5 minute TTL that ignores
 # both cache-busting query strings and client no-cache headers, so a fresh
 # release reads as "already up to date". The API serves the current blob, so it
@@ -816,6 +816,15 @@ print_status() {
         printf '%s\t%s\t%s\n' "$status" "$label" "$_stripped" >> "$_WARN_FILE" 2>/dev/null
     fi
 
+    # Safety net: keep a plain-text detail inside the column. Details holding
+    # a bar carry escapes and are sized by their caller instead, since clipping
+    # those would cut through an escape sequence or a multi-byte glyph.
+    if [[ "$detail" != *$'\033'* && "$detail" != *'\033'* ]]; then
+        local maxd=$(( ${CONTENT_WIDTH:-80} - 24 ))
+        [ "$maxd" -lt 10 ] && maxd=10
+        [ "${#detail}" -gt "$maxd" ] && detail="${detail:0:$maxd}"
+    fi
+
     vis_len "$label"
     if [ "$_vislen" -gt 20 ]; then
         label="${label:0:19}…"
@@ -1009,13 +1018,30 @@ check_storage() {
         pct=${pct:-0}
 
         local bar status
-        bar=$(draw_progress_bar "$pct")
         if [ "$pct" -lt "$DISK_LIMIT" ]; then
             status="OK"
         else
             status="WARN"
         fi
-        print_status "${mount}" "$status" "${avail} free / ${size} ${bar}  ${DIM}(${dev})${NC}"
+
+        # Size the row to the column. print_status spends 24 columns on the
+        # icon, label and spacing; the rest is ours. The device path is the
+        # first thing dropped, since it is the longest and least useful part.
+        local head="${avail} free / ${size}"
+        local dbudget=$(( ${CONTENT_WIDTH:-80} - 24 ))
+        [ "$dbudget" -lt 20 ] && dbudget=20
+
+        local barw=$(( dbudget - ${#head} - 7 ))
+        [ "$barw" -gt 20 ] && barw=20
+        [ "$barw" -lt 6 ]  && barw=6
+        bar=$(draw_progress_bar "$pct" "$barw")
+
+        local detail="${head} ${bar}"
+        local devtxt="(${dev})"
+        if [ $(( ${#head} + barw + 7 + 2 + ${#devtxt} )) -le "$dbudget" ]; then
+            detail="${detail}  ${DIM}${devtxt}${NC}"
+        fi
+        print_status "${mount}" "$status" "$detail"
     done < <(df -h -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null | awk 'NR>1')
 
     if touch /tmp/ro_test_check &>/dev/null; then
@@ -1741,6 +1767,9 @@ render_frame() {
         clear
         PREV_COLS=$cols
     fi
+    # Leave the last column empty: terminals that draw an overlay scrollbar
+    # (Windows Terminal among them) clip whatever is written into it.
+    [ "$cols" -gt 20 ] && cols=$(( cols - 1 ))
 
     # Column count scales with width; more columns is the strongest lever for
     # fitting everything on screen.
@@ -1794,7 +1823,7 @@ render_frame() {
 
     local lh hdr_h
     count_lines "$logo";     lh=$_nlines
-    count_lines "$hdr_body"; hdr_h=$_nlines
+    count_lines "$hdr_body"; hdr_h=$(( _nlines + 1 ))   # +1 for the blank line after it
 
     # --- Search for a layout that fits --------------------------------------
     # Progressively more compact variants, first match wins:
@@ -1835,13 +1864,16 @@ render_frame() {
 
     # --- Compose -------------------------------------------------------------
     # Order: logo, header, what needs attention, the sections, then the logs.
+    # The separators are added here rather than inside print_header_body:
+    # command substitution strips trailing newlines, so blank lines emitted by
+    # the header itself never survive into the buffer.
     local buffer=""
     [ "$chosen_logo" -eq 1 ] && buffer+="${logo}"$'\n'
-    buffer+="${hdr_body}"
+    buffer+="${hdr_body}"$'\n\n'
     [ -n "$attn" ] && buffer+="${attn}"$'\n\n'
     local body
     body=$(compose_n "$cw" "${_COLBUF[@]}")
-    [ -n "$body" ] && buffer+=$'\n'"${body}"
+    [ -n "$body" ] && buffer+="${body}"
     [ -n "$bbuf" ] && buffer+=$'\n'"${bbuf}"
 
     paint_frame "$buffer" "$rows"
