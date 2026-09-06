@@ -23,13 +23,13 @@
 #                                   a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.9.0"
+VERSION="1.9.1"
 # raw.githubusercontent.com sits behind a CDN with a 5 minute TTL that ignores
 # both cache-busting query strings and client no-cache headers, so a fresh
 # release reads as "already up to date". The API serves the current blob, so it
 # is tried first and the raw URL is kept only as a fallback.
-REPO_API="https://api.github.com/repos/adaflos/pihole-healthcheck/contents/healthcheck.sh?ref=master"
-REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
+REPO_API="https://api.github.com/repos/adaflos/healthcheck/contents/healthcheck.sh?ref=master"
+REPO_RAW="https://raw.githubusercontent.com/adaflos/healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
 # --- Color & Formatting Definitions (needed early for do_update) ---
