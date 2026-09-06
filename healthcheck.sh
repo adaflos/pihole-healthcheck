@@ -23,7 +23,7 @@
 #                                   a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.8.0"
+VERSION="1.9.0"
 # raw.githubusercontent.com sits behind a CDN with a 5 minute TTL that ignores
 # both cache-busting query strings and client no-cache headers, so a fresh
 # release reads as "already up to date". The API serves the current blob, so it
@@ -421,7 +421,7 @@ print_os_logo() {
 # UI PRIMITIVES
 #
 # Every drawing helper sizes itself from CONTENT_WIDTH, which render_frame
-# recomputes each frame from the real terminal width (minus the clock strip).
+# recomputes each frame from the real terminal width and column count.
 # Padding is always measured on plain text first; colour codes are injected
 # afterwards so ANSI bytes never corrupt column alignment.
 # ==============================================================================
@@ -575,7 +575,7 @@ panel() {
 # and its rendered output is reused until that expires.
 #
 # The result is written to _PANEL_OUT rather than echoed, so a cache hit costs
-# no fork at all. $SECONDS is a bash builtin, so the clock check is free too.
+# no fork at all. $SECONDS is a bash builtin, so the age check is free too.
 declare -A _pcache _pcache_ts _pcache_w _pwarn
 _PANEL_OUT=""
 _PANEL_WARN=""
@@ -653,23 +653,6 @@ add_panel() {
     printf -v "$bufvar" '%s' "$cur"
 }
 
-# The analog clock as a section, art centred in the available width.
-# ry controls the size; see generate_clock.
-clock_panel() {
-    local w="$1" ry="${2:-7}"
-    local content
-    content=$(
-        local line left
-        while IFS= read -r line; do
-            vis_len "$line"
-            left=$(( (w - _vislen) / 2 ))
-            [ "$left" -lt 0 ] && left=0
-            printf '%*s%s\n' "$left" '' "$line"
-        done <<< "$(generate_clock "$ry")"
-    )
-    section_wrap "CLOCK" "$content" "$w"
-}
-
 # A run of spaces to slice padding from, so padding costs no fork.
 _SPACES=$(printf '%*s' 400 '')
 
@@ -737,7 +720,7 @@ print_header_body() {
     loadavg=$(awk '{printf "%s %s %s", $1, $2, $3}' /proc/loadavg 2>/dev/null)
     if [ "$PIHOLE_MODE" = true ]; then scope="${PURPLE}pi-hole${NC}"; else scope="${CYAN}system${NC}"; fi
 
-    # Line 1: who and what, with the clock on the right.
+    # Line 1: who and what, with load and the time on the right.
     local left right
     left=$(printf '%b%s%b  %b%s · %s · up %s%b' \
         "${BOLD}${PURPLE}" "$(hostname)" "$NC" \
@@ -1531,115 +1514,6 @@ check_logs() {
 }
 
 # ==============================================================================
-# ASCII ANALOG CLOCK
-# ==============================================================================
-
-# generate_clock [ry]
-# ry is the vertical radius in rows; rx is twice that, because terminal cells
-# are about half as wide as they are tall. Everything else derives from it, so
-# the clock can be shrunk to fit the terminal.
-generate_clock() {
-    local ry="${1:-7}"
-    date '+%H %M %S' | awk -v RY="$ry" '
-    function lch(dx, dy,    adx, ady, vdy) {
-        adx = (dx >= 0) ? dx : -dx
-        ady = (dy >= 0) ? dy : -dy
-        vdy = ady * 2
-        if (vdy < adx * 0.4) return "-"
-        if (adx < vdy * 0.4) return "|"
-        if ((dx > 0 && dy > 0) || (dx < 0 && dy < 0)) return "\\"
-        return "/"
-    }
-    {
-        hour = ($1 + 0) % 12
-        min = $2 + 0
-        sec = $3 + 0
-
-        ry = RY + 0; rx = ry * 2
-        W = 2 * rx + 3; H = 2 * ry + 3
-        cx = rx + 1; cy = ry + 1
-        pi = atan2(0, -1)
-
-        for (y = 0; y < H; y++)
-            for (x = 0; x < W; x++) {
-                g[y,x] = " "; t[y,x] = 0
-            }
-
-        for (i = 0; i < 120; i++) {
-            a = i / 120.0 * 2 * pi - pi / 2
-            px = int(cx + rx * cos(a) + 0.5)
-            py = int(cy + ry * sin(a) + 0.5)
-            if (px >= 0 && px < W && py >= 0 && py < H && t[py,px] == 0) {
-                g[py,px] = "."; t[py,px] = 1
-            }
-        }
-
-        for (i = 1; i <= 12; i++) {
-            a = i / 12.0 * 2 * pi - pi / 2
-            ca = cos(a); sa = sin(a)
-            ch = lch(ca, sa)
-
-            ox = int(cx + rx * ca + 0.5)
-            oy = int(cy + ry * sa + 0.5)
-            g[oy,ox] = ch; t[oy,ox] = 2
-
-            ix = int(cx + rx * 0.88 * ca + 0.5)
-            iy = int(cy + ry * 0.88 * sa + 0.5)
-            if (ix != ox || iy != oy) { g[iy,ix] = ch; t[iy,ix] = 2 }
-
-            if (i == 12 || i == 3 || i == 6 || i == 9) {
-                mx = int(cx + rx * 0.78 * ca + 0.5)
-                my = int(cy + ry * 0.78 * sa + 0.5)
-                g[my,mx] = ch; t[my,mx] = 3
-                nx = int(cx + rx * 0.72 * ca + 0.5)
-                ny = int(cy + ry * 0.72 * sa + 0.5)
-                if (nx != mx || ny != my) { g[ny,nx] = ch; t[ny,nx] = 3 }
-            }
-        }
-
-        g[cy,cx] = "+"; t[cy,cx] = 6
-
-        ma = min / 60.0 * 2 * pi - pi / 2
-        mch = lch(cos(ma), sin(ma))
-        for (s = 0.1; s <= 0.82; s += 0.01) {
-            mx = int(cx + rx * s * cos(ma) + 0.5)
-            my = int(cy + ry * s * sin(ma) + 0.5)
-            if (mx >= 0 && mx < W && my >= 0 && my < H)
-                if (t[my,mx] <= 1) { g[my,mx] = mch; t[my,mx] = 5 }
-        }
-
-        ha = (hour + min / 60.0) / 12.0 * 2 * pi - pi / 2
-        hch = lch(cos(ha), sin(ha))
-        for (s = 0.1; s <= 0.52; s += 0.01) {
-            hx = int(cx + rx * s * cos(ha) + 0.5)
-            hy = int(cy + ry * s * sin(ha) + 0.5)
-            if (hx >= 0 && hx < W && hy >= 0 && hy < H)
-                if (t[hy,hx] <= 1 || t[hy,hx] == 5) { g[hy,hx] = hch; t[hy,hx] = 4 }
-        }
-
-        dim = "\033[2m"; bold = "\033[1m"
-        cyan = "\033[0;36m"; yel = "\033[1;33m"; nc = "\033[0m"
-
-        for (y = 0; y < H; y++) {
-            line = ""
-            for (x = 0; x < W; x++) {
-                c = g[y,x]; tp = t[y,x]
-                if      (tp == 1) line = line dim c nc
-                else if (tp == 2) line = line bold c nc
-                else if (tp == 3) line = line bold c nc
-                else if (tp == 4) line = line yel c nc
-                else if (tp == 5) line = line cyan c nc
-                else if (tp == 6) line = line bold c nc
-                else              line = line c
-            }
-            print line
-        }
-        pad = int((W - 8) / 2); if (pad < 0) pad = 0
-        printf "%*s%s%02d:%02d:%02d%s\n", pad, "", bold, ($1+0), min, sec, nc
-    }'
-}
-
-# ==============================================================================
 # JSON OUTPUT
 # ==============================================================================
 
@@ -1925,10 +1799,9 @@ render_frame() {
     # --- Search for a layout that fits --------------------------------------
     # Progressively more compact variants, first match wins:
     #   list length 5 -> 3 -> 2   (shorter process / port / container / log lists)
-    #   clock ry 7 -> 5 -> 3 -> 0 (smaller, then dropped; the header keeps the time)
     #   logo on -> off            (worth ~8 rows)
-    # Both list lengths stay cached, so settling on one costs nothing per frame.
-    local try_ll try_logo try_ry chosen_logo=1 fitted=false bh budget
+    # Every list length stays cached, so settling on one costs nothing per frame.
+    local try_ll try_logo chosen_logo=1 fitted=false bh budget
     local attn="" ah=0
     for try_ll in 5 3 2; do
         LIST_LIMIT=$try_ll
@@ -1942,36 +1815,22 @@ render_frame() {
         count_lines "$attn"; ah=$_nlines
         [ -n "$attn" ] && ah=$(( ah + 1 ))   # blank line after the block
 
-        local n_fixed=${#_BODY[@]}
+        # The packing does not depend on the logo, so do it once per list length.
+        pack_panels "$ncols"
 
         for try_logo in 1 0; do
-            for try_ry in 7 5 3 0; do
-                [ "$NO_COLOR" = true ] && [ "$try_ry" -gt 0 ] && continue
-
-                local head_h=$(( hdr_h + ah ))
-                [ "$try_logo" -eq 1 ] && head_h=$(( head_h + lh ))
-                budget=$(( rows - head_h - bh ))
-
-                _BODY=("${_BODY[@]:0:$n_fixed}")
-                _HEIGHT=("${_HEIGHT[@]:0:$n_fixed}")
-                if [ "$try_ry" -gt 0 ]; then
-                    local clk
-                    clk=$(clock_panel "$cw" "$try_ry")
-                    _BODY+=("$clk")
-                    count_lines "$clk"; _HEIGHT+=("$_nlines")
-                fi
-
-                pack_panels "$ncols"
-                if [ "$_MAXH" -le "$budget" ]; then
-                    chosen_logo=$try_logo; fitted=true
-                    break 3
-                fi
-            done
+            local head_h=$(( hdr_h + ah ))
+            [ "$try_logo" -eq 1 ] && head_h=$(( head_h + lh ))
+            budget=$(( rows - head_h - bh ))
+            if [ "$_MAXH" -le "$budget" ]; then
+                chosen_logo=$try_logo; fitted=true
+                break 2
+            fi
         done
     done
 
     # Nothing fit even at the most compact setting: keep that packing (no logo,
-    # no clock, shortest lists) and let the bottom clip rather than the top.
+    # shortest lists) and let the bottom clip rather than the top.
     [ "$fitted" = true ] || chosen_logo=0
 
     # --- Compose -------------------------------------------------------------
