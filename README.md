@@ -3,7 +3,7 @@
 Interactive top-style terminal dashboard for monitoring any Linux system. Supports **Pi-hole v6** monitoring out of the box, but works as a general-purpose system health tool on any distro.
 
 ![Bash](https://img.shields.io/badge/Bash-4+-green?logo=gnubash&logoColor=white)
-![Version](https://img.shields.io/badge/Version-1.9.0-orange)
+![Version](https://img.shields.io/badge/Version-1.10.0-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 ## Screenshots
@@ -16,6 +16,7 @@ Interactive top-style terminal dashboard for monitoring any Linux system. Suppor
 
 ## Features
 
+- **Hourly package-update check** — refreshes the package index in the background (apt, dnf, pacman, zypper, apk), reports how many packages are upgradable, and pushes kernel and security updates into Needs Attention
 - **Needs Attention roll-up** — every warning and failure across all checks is gathered into one block at the top, with a count; you see what is wrong without reading the whole screen
 - **Dense layout** — sections are a heading plus a hairline rule rather than a box, which is two rows lighter each; panels are placed into whichever column has room rather than a fixed side, across up to three columns on wide terminals (≥192 cols), two at ≥128, one below that
 - **Fits the screen** — the layout searches for a configuration that fits: shorter list sections, then dropping the OS logo
@@ -34,7 +35,7 @@ Interactive top-style terminal dashboard for monitoring any Linux system. Suppor
 - **Docker & container health** — auto-detects Docker/Podman, shows running/stopped/unhealthy counts, top containers by CPU/memory, restart loop detection
 - **Storage performance** — I/O wait times, live disk throughput, S.M.A.R.T. drive health, RAID/ZFS/Btrfs array status
 - **Thermal & sensor expansion** — drive temperatures, fan speeds, battery/UPS monitoring
-- **Security audit** — firewall status (ufw/nftables/iptables), Fail2ban jails, pending updates, active SSH sessions, kernel restart checks
+- **Security audit** — firewall status (ufw/nftables/iptables), Fail2ban jails, active SSH sessions, reboot-required checks
 - **Pi-hole v6 engine** — FTL service status, memory footprint, DNS lookup latency
 - **Log auditing** — system errors, OOM kills, failed SSH logins, FTL events, live DNS traffic
 - **JSON output** — structured JSON payload for Home Assistant, Prometheus, or custom tooling
@@ -100,6 +101,8 @@ healthcheck -n 5                # Custom refresh interval (5 seconds)
 healthcheck -1                  # One-shot mode (run once and exit)
 healthcheck --json              # Output structured JSON and exit
 healthcheck -m                  # No-color mode (plain text, no ANSI)
+healthcheck --no-update-check   # Skip the package index refresh entirely
+healthcheck --update-interval 30 # Refresh the package index every 30 min (default: 60)
 healthcheck -u                  # Check for updates and install latest version
 healthcheck -v                  # Print version
 ```
@@ -156,6 +159,7 @@ Flags can be combined: `healthcheck -r -l -n 3 --ram-limit 90 --webhook https://
 | **Storage** | Root disk usage, read-write verification, SD card I/O errors (dmesg) |
 | **Network** | Default interface, local IP, public internet reachability |
 | **Logs** | journalctl errors (1h), OOM kills, failed SSH logins |
+| **Package Updates** | Upgradable package count, kernel/security updates flagged, age of the last index refresh |
 
 ### Toggle panels
 
@@ -225,6 +229,26 @@ healthcheck --json | jq .
   "containers": { "engine": "docker", "running": 3 }
 }
 ```
+
+## Package Updates
+
+The dashboard refreshes the package index in the background once an hour and reports what is pending.
+
+| Manager | Refresh | Needs root? |
+|---------|---------|-------------|
+| `apt` | `apt-get update` | yes |
+| `dnf` | `dnf makecache` | yes |
+| `pacman` | `checkupdates` | **no** — syncs to its own temp database |
+| `zypper` | `zypper refresh` | yes |
+| `apk` | `apk update` | yes |
+
+The refresh runs detached, so it never blocks a frame, and it uses `sudo -n` — which fails rather than prompting. Without passwordless sudo the refresh is skipped and the count is read from the existing cache instead, labelled `cache only, no root`.
+
+Counting upgradable packages never needs root, so the numbers stay useful either way. On Debian/Ubuntu the count comes from a simulated `dist-upgrade` rather than `upgrade`, because a new kernel arrives as a *new* package that plain `upgrade` holds back and would otherwise never report.
+
+Updates matching kernel or core-security names — `linux-image*`, `kernel*`, `systemd`, `libc6`/`glibc`, `openssl`/`libssl*`, `openssh`, `sudo` — are raised into **Needs Attention**.
+
+The hourly timer is stored in `~/.cache/healthcheck/`, so restarting the dashboard does not trigger a fresh index refresh each time.
 
 ## Requirements
 

@@ -23,7 +23,7 @@
 #                                   a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.9.2"
+VERSION="1.10.0"
 # raw.githubusercontent.com sits behind a CDN with a 5 minute TTL that ignores
 # both cache-busting query strings and client no-cache headers, so a fresh
 # release reads as "already up to date". The API serves the current blob, so it
@@ -55,6 +55,11 @@ SHOW_THERMAL=false
 SHOW_SECURITY=false
 JSON_MODE=false
 NO_COLOR=false
+UPDATE_CHECK=true
+# How often the package index is refreshed, in seconds. Declared here rather
+# than beside the other package code so --update-interval cannot be clobbered
+# by a later default assignment.
+PKG_REFRESH_SECS=3600
 LOG_FILE=""
 WEBHOOK_URL=""
 
@@ -196,6 +201,18 @@ while [[ $# -gt 0 ]]; do
             NO_COLOR=true
             shift
             ;;
+        --no-update-check)
+            UPDATE_CHECK=false
+            shift
+            ;;
+        --update-interval)
+            if [ -z "$2" ] || [[ "$2" == -* ]]; then
+                echo "Error: --update-interval requires minutes"
+                exit 1
+            fi
+            PKG_REFRESH_SECS=$(( $2 * 60 ))
+            shift 2
+            ;;
         --json)
             JSON_MODE=true
             ONESHOT=true
@@ -242,6 +259,8 @@ Modes:
 Options:
   -n, --interval N     Refresh every N seconds (default: 1)
   -m, --no-color       Disable ANSI colors (for piping or plain terminals)
+  --no-update-check    Do not refresh the package index or show updates
+  --update-interval N  Refresh the package index every N minutes (default: 60)
   --temp-limit N       CPU temp warning threshold in °C (default: 75)
   --ram-limit N        RAM usage warning threshold in % (default: 85)
   --disk-limit N       Disk usage warning threshold in % (default: 90)
@@ -880,6 +899,167 @@ draw_progress_bar() {
 }
 
 # ==============================================================================
+# PACKAGE UPDATES
+#
+# Refreshing the package index needs root and takes seconds, so it runs as a
+# detached background job at most once an hour, writing its result to a state
+# file. The dashboard only ever reads that file, so a refresh can never block a
+# frame or prompt for a password. Counting upgradable packages needs no root,
+# so the numbers stay useful even when the index cannot be refreshed.
+# ==============================================================================
+
+PKG_MGR=""
+PKG_STATE_DIR=""
+PKG_RESULT=""
+PKG_STAMP=""
+_pkg_pid=""
+
+detect_pkg_mgr() {
+    if   command -v apt-get &>/dev/null; then PKG_MGR=apt
+    elif command -v dnf     &>/dev/null; then PKG_MGR=dnf
+    elif command -v pacman  &>/dev/null; then PKG_MGR=pacman
+    elif command -v zypper  &>/dev/null; then PKG_MGR=zypper
+    elif command -v apk     &>/dev/null; then PKG_MGR=apk
+    fi
+}
+
+# True when the index can be refreshed without asking for a password.
+# sudo -n never prompts: it fails instead, which is what we want.
+pkg_can_refresh() {
+    [ "$(id -u)" -eq 0 ] && return 0
+    command -v sudo &>/dev/null || return 1
+    sudo -n true 2>/dev/null
+}
+
+# Refresh the index (best effort) and print one upgradable package name per
+# line. Runs in a detached subshell; its output goes to a file, never the tty.
+pkg_refresh_worker() {
+    local sp=""
+    [ "$(id -u)" -eq 0 ] || sp="sudo -n"
+
+    case "$PKG_MGR" in
+        apt)
+            pkg_can_refresh && $sp apt-get update -qq >/dev/null 2>&1
+            # dist-upgrade rather than upgrade: a new kernel arrives as a NEW
+            # package (linux-image-<version>), which plain upgrade holds back
+            # and would therefore never report.
+            apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null \
+                | awk '/^Inst /{print $2}'
+            ;;
+        dnf)
+            pkg_can_refresh && $sp dnf -q makecache >/dev/null 2>&1
+            dnf -q check-update 2>/dev/null \
+                | awk 'NF>=3 && $1 !~ /^(Last|Obsoleting|Security)/ {sub(/\.[^.]*$/, "", $1); print $1}'
+            ;;
+        pacman)
+            # checkupdates syncs into its own temporary database, so this one
+            # needs no root at all.
+            checkupdates 2>/dev/null | awk '{print $1}'
+            ;;
+        zypper)
+            pkg_can_refresh && $sp zypper -q refresh >/dev/null 2>&1
+            zypper -q list-updates 2>/dev/null \
+                | awk -F'|' '/^v /{gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3}'
+            ;;
+        apk)
+            pkg_can_refresh && $sp apk update >/dev/null 2>&1
+            apk version -l '<' 2>/dev/null | tail -n +2 | awk '{print $1}'
+            ;;
+    esac
+}
+
+# Start a refresh if one is due and none is already running. Returns at once.
+pkg_maybe_refresh() {
+    [ "$UPDATE_CHECK" = true ] || return 0
+    [ -n "$PKG_MGR" ] || return 0
+    [ -n "$PKG_STATE_DIR" ] || return 0
+
+    # Do not stack refreshes: apt update can outlive the interval on a slow link.
+    if [ -n "$_pkg_pid" ] && kill -0 "$_pkg_pid" 2>/dev/null; then return 0; fi
+
+    local last=0 now
+    [ -f "$PKG_STAMP" ] && last=$(cat "$PKG_STAMP" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    now=$(date +%s)
+    [ $(( now - last )) -lt "$PKG_REFRESH_SECS" ] && return 0
+
+    {
+        pkg_refresh_worker > "${PKG_RESULT}.tmp" 2>/dev/null
+        mv -f "${PKG_RESULT}.tmp" "$PKG_RESULT" 2>/dev/null
+        date +%s > "$PKG_STAMP" 2>/dev/null
+    } &
+    _pkg_pid=$!
+    disown "$_pkg_pid" 2>/dev/null
+    return 0
+}
+
+# --- Package updates panel ---
+check_updates() {
+    if [ "$UPDATE_CHECK" != true ]; then
+        print_status "Update Check" "OK" "Disabled (--no-update-check)"
+        echo ""
+        return
+    fi
+    if [ -z "$PKG_MGR" ]; then
+        print_status "Package Manager" "OK" "None detected"
+        echo ""
+        return
+    fi
+
+    if [ ! -f "$PKG_RESULT" ]; then
+        print_status "Upgradable" "OK" "Checking in background..."
+        echo ""
+        return
+    fi
+
+    # Matched with a case statement rather than grep: a host with 300 pending
+    # packages would otherwise mean 300 forks per render.
+    local total=0 ncrit=0 crit="" p
+    while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        total=$(( total + 1 ))
+        case "$p" in
+            linux-image*|linux-headers*|linux|linux-lts|linux-generic|\
+            kernel|kernel-core|kernel-default|kernel-devel|\
+            systemd|libc6|glibc|openssl|libssl*|openssh-server|openssh|sudo)
+                ncrit=$(( ncrit + 1 ))
+                [ "$ncrit" -le 4 ] && crit+="${p} "
+                ;;
+        esac
+    done < "$PKG_RESULT"
+
+    if [ "$total" -eq 0 ]; then
+        print_status "Upgradable" "OK" "System up to date"
+    elif [ "$total" -lt 20 ]; then
+        print_status "Upgradable" "OK" "${total} package(s) via ${PKG_MGR}"
+    else
+        print_status "Upgradable" "WARN" "${total} package(s) via ${PKG_MGR}"
+    fi
+
+    # WARN puts this straight into the NEEDS ATTENTION roll-up.
+    if [ "$ncrit" -gt 0 ]; then
+        local extra=""
+        [ "$ncrit" -gt 4 ] && extra="+$(( ncrit - 4 )) more"
+        print_status "Security/Kernel" "WARN" "${crit}${extra}"
+    fi
+
+    local last=0 age
+    [ -f "$PKG_STAMP" ] && last=$(cat "$PKG_STAMP" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    if [ "$last" -gt 0 ]; then
+        age=$(( ( $(date +%s) - last ) / 60 ))
+        if pkg_can_refresh; then
+            print_status "Index Checked" "OK" "${age}m ago"
+        else
+            # Without root the count still works, but it reflects whatever the
+            # last system-run refresh left behind.
+            print_status "Index Checked" "OK" "${age}m ago (cache only, no root)"
+        fi
+    fi
+    echo ""
+}
+
+# ==============================================================================
 # CHECK FUNCTIONS
 # ==============================================================================
 
@@ -1445,27 +1625,6 @@ check_security_audit() {
         fi
     fi
 
-    # Pending Updates (uses cached file when available, avoids slow apt/dnf queries)
-    if [ -f /var/lib/update-notifier/updates-available ]; then
-        local updates
-        updates=$(grep -oP '\d+(?= packages? can be updated)' /var/lib/update-notifier/updates-available 2>/dev/null | head -1)
-        if [ "${updates:-0}" -gt 0 ]; then
-            print_status "Pending Updates" "WARN" "${updates} package(s) upgradable"
-        else
-            print_status "Pending Updates" "OK" "System up to date"
-        fi
-    elif [ -f /var/lib/pacman/db.lck ] || command -v pacman &>/dev/null; then
-        if command -v checkupdates &>/dev/null; then
-            local updates
-            updates=$(checkupdates 2>/dev/null | wc -l)
-            if [ "${updates:-0}" -gt 0 ]; then
-                print_status "Pending Updates" "WARN" "${updates} package(s) available"
-            else
-                print_status "Pending Updates" "OK" "System up to date"
-            fi
-        fi
-    fi
-
     # Active User Sessions
     local active_users
     active_users=$(who 2>/dev/null | wc -l)
@@ -1780,6 +1939,7 @@ render_frame() {
     local cw=$(( (cols - (ncols - 1)) / ncols ))
 
     update_cpu_usage
+    pkg_maybe_refresh   # returns at once; the work is detached
 
     # --- Pieces with a fixed position ---------------------------------------
     # Logs stay full width at the bottom: their lines are the longest on screen
@@ -1811,6 +1971,7 @@ render_frame() {
             _collect STO "STORAGE & MOUNTS" check_storage 5
             [ "$SHOW_STORAGE_PERF" = true ] && _collect STOP "STORAGE PERFORMANCE" check_storage_performance 5
         fi
+        [ "$LESS_MODE" != true ] && _collect UPD "PACKAGE UPDATES" check_updates 30
         [ "$PIHOLE_MODE" = true ] && _collect PH "PI-HOLE v6 ENGINE" check_pihole_v6 3
         if [ "$LESS_MODE" != true ]; then
             _collect NET "NETWORK" check_network_security 3
@@ -1902,6 +2063,20 @@ fi
 # Scratch file the checks append their WARN/FAIL lines to; see print_status.
 # Checks render in subshells, so a shared file is how their findings get back.
 _WARN_SCRATCH=$(mktemp 2>/dev/null) || _WARN_SCRATCH=""
+
+# Package-update state. Kept under the cache directory rather than a temp file
+# so the hourly timer survives a restart: relaunching the dashboard does not
+# trigger a fresh apt update every time.
+detect_pkg_mgr
+if [ "$UPDATE_CHECK" = true ] && [ -n "$PKG_MGR" ]; then
+    PKG_STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/healthcheck"
+    if mkdir -p "$PKG_STATE_DIR" 2>/dev/null; then
+        PKG_RESULT="$PKG_STATE_DIR/upgradable"
+        PKG_STAMP="$PKG_STATE_DIR/last_refresh"
+    else
+        PKG_STATE_DIR=""
+    fi
+fi
 
 # --- One-shot mode ---
 if [ "$ONESHOT" = true ]; then
