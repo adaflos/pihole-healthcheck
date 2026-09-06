@@ -3,7 +3,7 @@
 Interactive top-style terminal dashboard for monitoring any Linux system. Supports **Pi-hole v6** monitoring out of the box, but works as a general-purpose system health tool on any distro.
 
 ![Bash](https://img.shields.io/badge/Bash-4+-green?logo=gnubash&logoColor=white)
-![Version](https://img.shields.io/badge/Version-1.6.1-orange)
+![Version](https://img.shields.io/badge/Version-1.6.2-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 ## Screenshots

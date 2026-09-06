@@ -23,7 +23,12 @@
 #   p            Toggle Pi-hole     a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.6.1"
+VERSION="1.6.2"
+# raw.githubusercontent.com sits behind a CDN with a 5 minute TTL that ignores
+# both cache-busting query strings and client no-cache headers, so a fresh
+# release reads as "already up to date". The API serves the current blob, so it
+# is tried first and the raw URL is kept only as a fallback.
+REPO_API="https://api.github.com/repos/adaflos/pihole-healthcheck/contents/healthcheck.sh?ref=master"
 REPO_RAW="https://raw.githubusercontent.com/adaflos/pihole-healthcheck/master/healthcheck.sh"
 INSTALL_PATH="/usr/local/bin/healthcheck"
 
@@ -98,17 +103,29 @@ do_update() {
     tmp=$(mktemp) || { echo -e "  ${RED}Failed to create temp file.${NC}"; exit 1; }
     trap "rm -f '$tmp'" RETURN
 
+    # API first (always current), raw URL second (may be up to 5 min stale, but
+    # still works if the API is unreachable or rate limited).
+    local fetched=false
     if command -v curl &>/dev/null; then
-        curl -fsSL "$REPO_RAW" -o "$tmp" 2>/dev/null
+        curl -fsSL -H 'Accept: application/vnd.github.raw' "$REPO_API" -o "$tmp" 2>/dev/null && [ -s "$tmp" ] && fetched=true
+        [ "$fetched" = true ] || { curl -fsSL "$REPO_RAW" -o "$tmp" 2>/dev/null && [ -s "$tmp" ] && fetched=true; }
     elif command -v wget &>/dev/null; then
-        wget -qO "$tmp" "$REPO_RAW" 2>/dev/null
+        wget -qO "$tmp" --header='Accept: application/vnd.github.raw' "$REPO_API" 2>/dev/null && [ -s "$tmp" ] && fetched=true
+        [ "$fetched" = true ] || { wget -qO "$tmp" "$REPO_RAW" 2>/dev/null && [ -s "$tmp" ] && fetched=true; }
     else
         echo -e "  ${RED}Neither curl nor wget found. Cannot check for updates.${NC}"
         exit 1
     fi
 
-    if [ ! -s "$tmp" ]; then
+    if [ "$fetched" != true ]; then
         echo -e "  ${RED}Failed to fetch remote script. Check your internet connection.${NC}"
+        exit 1
+    fi
+
+    # Refuse to install anything that is not actually the script: a rate-limit
+    # JSON body or an error page must never overwrite the installed binary.
+    if ! head -n1 "$tmp" | grep -q '^#!.*sh'; then
+        echo -e "  ${RED}Downloaded file is not a shell script; refusing to install.${NC}"
         exit 1
     fi
 
