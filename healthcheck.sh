@@ -16,14 +16,14 @@
 #   Self-Update:       ./healthcheck -u
 #
 # Controls:
-#   q / Ctrl-C   Quit              d   Toggle Docker panel
-#   r            Force refresh      n   Toggle Network diagnostics
-#   l            Toggle log-only    s   Toggle Storage performance
-#   c            Toggle CPU info    t   Toggle Thermal sensors
-#   p            Toggle Pi-hole     a   Toggle Security audit
+#   q / Ctrl-C   Quit               d   Toggle Docker panel
+#   l            Toggle log-only    n   Toggle Network diagnostics
+#   c            Toggle CPU info    s   Toggle Storage performance
+#   p            Toggle Pi-hole     t   Toggle Thermal sensors
+#                                   a   Toggle Security audit
 # ==============================================================================
 
-VERSION="1.6.2"
+VERSION="1.7.0"
 # raw.githubusercontent.com sits behind a CDN with a 5 minute TTL that ignores
 # both cache-busting query strings and client no-cache headers, so a fresh
 # release reads as "already up to date". The API serves the current blob, so it
@@ -60,6 +60,9 @@ WEBHOOK_URL=""
 
 # --- Layout ---
 CONTENT_WIDTH=80
+# How many rows list-style sections show (processes, ports, containers, log
+# lines). The layout engine lowers this when the frame would not otherwise fit.
+LIST_LIMIT=5
 
 # --- Thresholds ---
 TEMP_LIMIT=75
@@ -248,11 +251,11 @@ Options:
   -v, --version        Show version and exit
 
 Interactive Controls:
-  q / Ctrl-C   Quit              d   Toggle Docker panel
-  r            Force refresh      n   Toggle Network diagnostics
-  l            Toggle log-only    s   Toggle Storage performance
-  c            Toggle CPU info    t   Toggle Thermal sensors
-  p            Toggle Pi-hole     a   Toggle Security audit
+  q / Ctrl-C   Quit               d   Toggle Docker panel
+  l            Toggle log-only    n   Toggle Network diagnostics
+  c            Toggle CPU info    s   Toggle Storage performance
+  p            Toggle Pi-hole     t   Toggle Thermal sensors
+                                  a   Toggle Security audit
 HELPEOF
             exit 0
             ;;
@@ -563,10 +566,11 @@ _PANEL_OUT=""
 
 render_panel() {
     local key="$1" title="$2" fn="$3" w="$4" ttl="$5"
+    # Width and list length are part of the identity of a rendered panel, so a
+    # resize or a change of LIST_LIMIT invalidates it.
+    local sig="${w}:${LIST_LIMIT}"
 
-    # Reuse only while fresh AND rendered at the current width, so a resize
-    # invalidates every panel.
-    if [ "$ttl" -gt 0 ] && [ -n "${_pcache[$key]:-}" ] && [ "${_pcache_w[$key]:-}" = "$w" ]; then
+    if [ "$ttl" -gt 0 ] && [ -n "${_pcache[$key]:-}" ] && [ "${_pcache_w[$key]:-}" = "$sig" ]; then
         if [ $(( SECONDS - ${_pcache_ts[$key]:-0} )) -lt "$ttl" ]; then
             _PANEL_OUT="${_pcache[$key]}"
             return
@@ -576,7 +580,7 @@ render_panel() {
     _PANEL_OUT=$(panel "$title" "$fn" "$w")
     _pcache[$key]="$_PANEL_OUT"
     _pcache_ts[$key]=$SECONDS
-    _pcache_w[$key]="$w"
+    _pcache_w[$key]="$sig"
 }
 
 # Append a panel's output to a named buffer variable.
@@ -610,33 +614,51 @@ clock_panel() {
     box_wrap "CLOCK" "$content" "$w"
 }
 
-# Print two pre-rendered column buffers side by side.
-# The left column is padded to lw so the right column stays aligned even
-# once the shorter column has run out of lines.
-compose_columns() {
-    local left="$1" right="$2" lw="$3"
-    local -a L R
-    mapfile -t L <<< "$left"
-    mapfile -t R <<< "$right"
+# A run of spaces to slice padding from, so padding costs no fork.
+_SPACES=$(printf '%*s' 400 '')
 
-    local n=${#L[@]}
-    [ "${#R[@]}" -gt "$n" ] && n=${#R[@]}
+# Merge N pre-rendered column buffers side by side.
+#   compose_n <column_width> <buf0> [buf1 ...]
+# Each column is padded out to the running canvas width so the next one lines
+# up even after a shorter column has run out of rows.
+compose_n() {
+    local cw="$1"; shift
+    [ $# -eq 0 ] && return
 
-    local i l r pad
-    for ((i = 0; i < n; i++)); do
-        l="${L[i]-}"
-        r="${R[i]-}"
-        # Nothing to the right: emit the left cell alone rather than trailing
-        # padding. \033[K in the paint loop clears the rest of the row.
-        if [ -z "$r" ]; then
-            printf '%s\n' "$l"
+    local -a O
+    mapfile -t O <<< "$1"; shift
+
+    local accw=$cw
+    local buf
+    for buf in "$@"; do
+        if [ -z "$buf" ]; then
+            accw=$(( accw + 1 + cw ))
             continue
         fi
-        vis_len "$l"
-        pad=$(( lw - _vislen ))
-        [ "$pad" -lt 0 ] && pad=0
-        printf '%s%*s %s\n' "$l" "$pad" '' "$r"
+        local -a B NEW=()
+        mapfile -t B <<< "$buf"
+
+        local n=${#O[@]}
+        [ "${#B[@]}" -gt "$n" ] && n=${#B[@]}
+
+        local i l r pad
+        for ((i = 0; i < n; i++)); do
+            l="${O[i]-}"
+            r="${B[i]-}"
+            if [ -z "$r" ]; then
+                NEW+=("$l")
+                continue
+            fi
+            vis_len "$l"
+            pad=$(( accw - _vislen ))
+            [ "$pad" -lt 0 ] && pad=0
+            NEW+=("${l}${_SPACES:0:$pad} ${r}")
+        done
+        O=("${NEW[@]}")
+        accw=$(( accw + 1 + cw ))
     done
+
+    printf '%s\n' "${O[@]}"
 }
 
 # Pad a string to N display columns.
@@ -682,9 +704,9 @@ fmt_uptime() {
     else                      printf '%dm' "$m"; fi
 }
 
-print_header() {
-    print_os_logo
-
+# The header without the OS logo. Kept separate so the layout engine can drop
+# the logo (worth ~8 rows) when the frame would not otherwise fit.
+print_header_body() {
     local title emoji_extra
     if [ "$LESS_MODE" = true ]; then
         if [ "$PIHOLE_MODE" = true ]; then
@@ -722,8 +744,9 @@ print_header() {
         "$view_label" "${DIM}·${NC}" "$scope_label" "${DIM}·${NC}" "${BOLD}${REFRESH}" "$DIM" "$NC"
 
     # Hotkey legend, marking which toggle panels are currently on.
+    # No refresh key: the frame already redraws every interval.
     local keys=""
-    keys+="$(hotkey q uit off)  $(hotkey r efresh off)  "
+    keys+="$(hotkey q uit off)  "
     keys+="$(hotkey l og "$LESS_MODE")  $(hotkey c pu "$SHOW_CPU")  "
     keys+="$(hotkey p ihole "$PIHOLE_MODE")  $(hotkey d ocker "$SHOW_DOCKER")  "
     keys+="$(hotkey n et "$SHOW_NETWORK")  $(hotkey s torage "$SHOW_STORAGE_PERF")  "
@@ -938,7 +961,7 @@ check_cpu_info() {
     fi
 
     local top_procs
-    top_procs=$(ps -eo pid,pcpu,comm --sort=-pcpu --no-headers | head -n 5)
+    top_procs=$(ps -eo pid,pcpu,comm --sort=-pcpu --no-headers | head -n "$LIST_LIMIT")
     if [ -n "$top_procs" ]; then
         print_status "Top Processes (CPU)" "OK" ""
         echo "$top_procs" | while read -r line; do
@@ -1141,7 +1164,7 @@ check_network_diagnostics() {
             proc = $7;
             gsub(/.*"/, "", proc); gsub(/".*/, "", proc);
             if (port+0 > 0) printf "      %-8s %s\n", port, proc
-        }' | sort -t' ' -k1 -n | head -8)
+        }' | sort -t' ' -k1 -n | head -n $(( LIST_LIMIT + 3 )))
         if [ -n "$listeners" ]; then
             print_status "Listening Ports" "OK" "Top listeners:"
             while IFS= read -r lline; do
@@ -1247,7 +1270,7 @@ check_docker() {
 
     if [ "$running" -gt 0 ]; then
         print_status "Running Containers" "OK" ""
-        printf '%s\n' "$ps_out" | awk -F'|' '$1=="running"' | head -5 | \
+        printf '%s\n' "$ps_out" | awk -F'|' '$1=="running"' | head -n "$LIST_LIMIT" | \
         while IFS='|' read -r _ name cstatus; do
             print_detail "$(printf '%-25s %s' "$name" "$cstatus")"
         done
@@ -1414,7 +1437,7 @@ check_security_audit() {
 # --- 8. Logs & System Audit (Live Stream) ---
 check_logs() {
 
-    recent_errors=$(journalctl -p 0..3 --since "1 hour ago" --no-pager -n 5 2>/dev/null | grep -v "vc4-drm" | tail -n 5)
+    recent_errors=$(journalctl -p 0..3 --since "1 hour ago" --no-pager -n "$LIST_LIMIT" 2>/dev/null | grep -v "vc4-drm" | tail -n "$LIST_LIMIT")
     if [ -n "$recent_errors" ]; then
         print_status "System Errors (1h)" "WARN" "Errors detected:"
         echo "$recent_errors" | while read -r line; do
@@ -1425,7 +1448,7 @@ check_logs() {
     fi
 
     if [ "$PIHOLE_MODE" = true ]; then
-        ftl_logs=$(journalctl -u pihole-FTL -p 0..4 --since "2 hours ago" --no-pager -n 5 2>/dev/null | tail -n 5)
+        ftl_logs=$(journalctl -u pihole-FTL -p 0..4 --since "2 hours ago" --no-pager -n "$LIST_LIMIT" 2>/dev/null | tail -n "$LIST_LIMIT")
         if [ -n "$ftl_logs" ]; then
             print_status "FTL Log Events (2h)" "WARN" "Recent entries:"
             echo "$ftl_logs" | while read -r line; do
@@ -1455,7 +1478,7 @@ check_logs() {
     fi
 
     if [ "$PIHOLE_MODE" = true ] && [ -f /var/log/pihole/pihole.log ]; then
-        last_queries=$(tail -n 5 /var/log/pihole/pihole.log 2>/dev/null | grep -E 'query|reply')
+        last_queries=$(tail -n "$LIST_LIMIT" /var/log/pihole/pihole.log 2>/dev/null | grep -E 'query|reply')
         if [ -n "$last_queries" ]; then
             print_status "Live DNS Traffic" "OK" "Recent queries:"
             echo "$last_queries" | while read -r line; do
@@ -1770,6 +1793,31 @@ update_throughput_state() {
 
 PREV_COLS=0
 
+# Distribute rendered panels across NCOLS columns, each panel going to whichever
+# column is currently shortest. Reads _BODY / _HEIGHT, writes _COLBUF and _MAXH.
+pack_panels() {
+    local ncols="$1"
+    local -a colh
+    local c i best
+    _COLBUF=()
+    for ((c = 0; c < ncols; c++)); do colh[c]=0; _COLBUF[c]=""; done
+
+    for ((i = 0; i < ${#_BODY[@]}; i++)); do
+        best=0
+        for ((c = 1; c < ncols; c++)); do
+            [ "${colh[c]}" -lt "${colh[best]}" ] && best=$c
+        done
+        if [ -n "${_COLBUF[best]}" ]; then _COLBUF[best]+=$'\n'; fi
+        _COLBUF[best]+="${_BODY[i]}"
+        colh[best]=$(( colh[best] + _HEIGHT[i] ))
+    done
+
+    _MAXH=0
+    for ((c = 0; c < ncols; c++)); do
+        [ "${colh[c]}" -gt "$_MAXH" ] && _MAXH=${colh[c]}
+    done
+}
+
 render_frame() {
     local cols rows
     cols=$(tput cols 2>/dev/null)  || cols=80
@@ -1779,97 +1827,111 @@ render_frame() {
         PREV_COLS=$cols
     fi
 
-    # Two columns once there is room for two readable panels side by side;
-    # otherwise everything stacks full width. Both columns share one width so
-    # a panel can be rendered before its column is chosen.
-    local two_col=false pw=$cols
-    if [ "$cols" -ge 128 ]; then
-        two_col=true
-        pw=$(( (cols - 1) / 2 ))
+    # Column count scales with width; more columns is the strongest lever for
+    # fitting everything on screen.
+    local ncols=1
+    if   [ "$cols" -ge 192 ]; then ncols=3
+    elif [ "$cols" -ge 128 ]; then ncols=2
     fi
+    local cw=$(( (cols - (ncols - 1)) / ncols ))
 
-    # Refresh derived counters before any panel is rendered.
     update_cpu_usage
 
-    # --- Header (full width) -------------------------------------------------
-    local header
-    header=$( CONTENT_WIDTH=$cols; print_header 2>/dev/null )
+    # --- Pieces with a fixed position ---------------------------------------
+    # Logs stay full width at the bottom: their lines are the longest on screen
+    # and would be gutted by a narrow column.
+    # The logs panel is rebuilt inside the fit search below, since its height
+    # depends on LIST_LIMIT.
+    local logo hdr_body bbuf=""
+    logo=$( CONTENT_WIDTH=$cols; print_os_logo 2>/dev/null )
+    hdr_body=$( CONTENT_WIDTH=$cols; print_header_body 2>/dev/null )
 
-    # --- Panels --------------------------------------------------------------
-    # Fixed columns, so a toggle always opens on a predictable side:
-    #   LEFT   hardware, storage, pi-hole, network + the d / s toggles
-    #   RIGHT  clock                              + the c / t / n toggles
-    #   BOTTOM security audit (a) and logs, full width
-    #
-    # TTLs keep the costly probes from re-running every second; see
-    # render_panel. Cheap, fast-moving panels stay at 0 (every frame).
-    local lbuf="" rbuf="" bbuf="" w=$pw
-    [ "$two_col" = true ] || w=$cols
+    # Render every enabled panel, in a stable order. Placement is decided later
+    # by pack_panels, so nothing is tied to a particular column.
+    # TTLs keep costly probes from re-running every second; see render_panel.
+    _collect() {
+        render_panel "$1" "$2" "$3" "$cw" "$4"
+        [ -z "$_PANEL_OUT" ] && return
+        _BODY+=("$_PANEL_OUT")
+        count_lines "$_PANEL_OUT"
+        _HEIGHT+=("$_nlines")
+    }
 
-    add_panel lbuf HW "HARDWARE & THERMAL" check_hardware "$w" 0
-    if [ "$LESS_MODE" != true ]; then
-        add_panel lbuf STO "STORAGE & MOUNTS" check_storage "$w" 5
-        [ "$SHOW_STORAGE_PERF" = true ] && add_panel lbuf STOP "STORAGE PERFORMANCE" check_storage_performance "$w" 5
-    fi
-    [ "$PIHOLE_MODE" = true ] && add_panel lbuf PH "PI-HOLE v6 ENGINE" check_pihole_v6 "$w" 3
-    if [ "$LESS_MODE" != true ]; then
-        add_panel lbuf NET "NETWORK" check_network_security "$w" 3
-        [ "$SHOW_DOCKER" = true ] && add_panel lbuf DOCK "CONTAINERS" check_docker "$w" 5
-    fi
-
-    [ "$SHOW_CPU" = true ]     && add_panel rbuf CPU "CPU INFORMATION" check_cpu_info "$w" 2
-    [ "$SHOW_THERMAL" = true ] && add_panel rbuf THERM "THERMAL & SENSORS" check_thermal_expanded "$w" 10
-    if [ "$LESS_MODE" != true ] && [ "$SHOW_NETWORK" = true ]; then
-        add_panel rbuf NDIAG "NETWORK DIAGNOSTICS" check_network_diagnostics "$w" 3
-    fi
-
-    if [ "$LESS_MODE" != true ] && [ "$SHOW_SECURITY" = true ]; then
-        add_panel bbuf AUDIT "SECURITY AUDIT" check_security_audit "$cols" 15
-    fi
-    add_panel bbuf LOGS "LOGS & SYSTEM AUDIT STREAM" check_logs "$cols" 3
-
-    # --- Fit the clock into whatever vertical room is left -------------------
-    # The clock is the one element free to shrink, so it absorbs the overflow:
-    # full analog, then progressively smaller, then dropped entirely (the
-    # header's Time field still shows the clock digitally).
-    local hh lh rh bh budget avail
-    count_lines "$header"; hh=$_nlines
-    count_lines "$lbuf";   lh=$_nlines
-    count_lines "$rbuf";   rh=$_nlines
-    count_lines "$bbuf";   bh=$_nlines
-
-    if [ "$NO_COLOR" != true ]; then
-        if [ "$two_col" = true ]; then
-            budget=$(( rows - hh - bh ))
-            avail=$(( budget - rh ))          # room above the right column
-        else
-            avail=$(( rows - hh - bh - lh - rh ))
+    collect_all() {
+        _BODY=(); _HEIGHT=()
+        _collect HW "HARDWARE & THERMAL" check_hardware 0
+        [ "$SHOW_CPU" = true ]     && _collect CPU "CPU INFORMATION" check_cpu_info 2
+        [ "$SHOW_THERMAL" = true ] && _collect THERM "THERMAL & SENSORS" check_thermal_expanded 10
+        if [ "$LESS_MODE" != true ]; then
+            _collect STO "STORAGE & MOUNTS" check_storage 5
+            [ "$SHOW_STORAGE_PERF" = true ] && _collect STOP "STORAGE PERFORMANCE" check_storage_performance 5
         fi
-
-        # Panel height for radius ry is 2*ry + 6 (art + digital line + borders).
-        local cry=0
-        if   [ "$avail" -ge 20 ]; then cry=7
-        elif [ "$avail" -ge 16 ]; then cry=5
-        elif [ "$avail" -ge 12 ]; then cry=3
+        [ "$PIHOLE_MODE" = true ] && _collect PH "PI-HOLE v6 ENGINE" check_pihole_v6 3
+        if [ "$LESS_MODE" != true ]; then
+            _collect NET "NETWORK" check_network_security 3
+            [ "$SHOW_NETWORK" = true ]  && _collect NDIAG "NETWORK DIAGNOSTICS" check_network_diagnostics 3
+            [ "$SHOW_DOCKER" = true ]   && _collect DOCK "CONTAINERS" check_docker 5
+            [ "$SHOW_SECURITY" = true ] && _collect AUDIT "SECURITY AUDIT" check_security_audit 15
         fi
+        return 0
+    }
 
-        if [ "$cry" -gt 0 ]; then
-            local clk
-            clk=$(clock_panel "$w" "$cry")
-            if [ -n "$rbuf" ]; then rbuf="${clk}"$'\n'"${rbuf}"; else rbuf="$clk"; fi
-        fi
-    fi
+    local lh hdr_h
+    count_lines "$logo";     lh=$_nlines
+    count_lines "$hdr_body"; hdr_h=$_nlines
+
+    # --- Search for a layout that fits --------------------------------------
+    # Progressively more compact variants, first match wins:
+    #   list length 5 -> 3 -> 2   (shorter process / port / container / log lists)
+    #   clock ry 7 -> 5 -> 3 -> 0 (smaller, then dropped; the header keeps the time)
+    #   logo on -> off            (worth ~8 rows)
+    # Both list lengths stay cached, so settling on one costs nothing per frame.
+    local try_ll try_logo try_ry chosen_logo=1 fitted=false bh budget
+    for try_ll in 5 3 2; do
+        LIST_LIMIT=$try_ll
+        collect_all
+        bbuf=""
+        add_panel bbuf LOGS "LOGS & SYSTEM AUDIT STREAM" check_logs "$cols" 3
+        count_lines "$bbuf"; bh=$_nlines
+        local n_fixed=${#_BODY[@]}
+
+        for try_logo in 1 0; do
+            for try_ry in 7 5 3 0; do
+                [ "$NO_COLOR" = true ] && [ "$try_ry" -gt 0 ] && continue
+
+                local head_h=$hdr_h
+                [ "$try_logo" -eq 1 ] && head_h=$(( head_h + lh ))
+                budget=$(( rows - head_h - bh ))
+
+                _BODY=("${_BODY[@]:0:$n_fixed}")
+                _HEIGHT=("${_HEIGHT[@]:0:$n_fixed}")
+                if [ "$try_ry" -gt 0 ]; then
+                    local clk
+                    clk=$(clock_panel "$cw" "$try_ry")
+                    _BODY+=("$clk")
+                    count_lines "$clk"; _HEIGHT+=("$_nlines")
+                fi
+
+                pack_panels "$ncols"
+                if [ "$_MAXH" -le "$budget" ]; then
+                    chosen_logo=$try_logo; fitted=true
+                    break 3
+                fi
+            done
+        done
+    done
+
+    # Nothing fit even at the most compact setting: keep that packing (no logo,
+    # no clock, shortest lists) and let the bottom clip rather than the top.
+    [ "$fitted" = true ] || chosen_logo=0
 
     # --- Compose -------------------------------------------------------------
-    local buffer
-    if [ "$two_col" = true ]; then
-        buffer="${header}"$'\n'"$(compose_columns "$lbuf" "$rbuf" "$pw")"
-    else
-        # Stacked: hardware and storage first, then the toggle panels.
-        buffer="${header}"
-        [ -n "$lbuf" ] && buffer+=$'\n'"${lbuf}"
-        [ -n "$rbuf" ] && buffer+=$'\n'"${rbuf}"
-    fi
+    local buffer=""
+    [ "$chosen_logo" -eq 1 ] && buffer+="${logo}"$'\n'
+    buffer+="${hdr_body}"
+    local body
+    body=$(compose_n "$cw" "${_COLBUF[@]}")
+    [ -n "$body" ] && buffer+=$'\n'"${body}"
     [ -n "$bbuf" ] && buffer+=$'\n'"${bbuf}"
 
     paint_frame "$buffer" "$rows"
@@ -1928,9 +1990,6 @@ while true; do
             case "$key" in
                 q|Q)
                     exit 0
-                    ;;
-                r|R)
-                    break
                     ;;
                 l|L)
                     LESS_MODE=$( [ "$LESS_MODE" = true ] && echo false || echo true )

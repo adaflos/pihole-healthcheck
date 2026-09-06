@@ -3,7 +3,7 @@
 Interactive top-style terminal dashboard for monitoring any Linux system. Supports **Pi-hole v6** monitoring out of the box, but works as a general-purpose system health tool on any distro.
 
 ![Bash](https://img.shields.io/badge/Bash-4+-green?logo=gnubash&logoColor=white)
-![Version](https://img.shields.io/badge/Version-1.6.2-orange)
+![Version](https://img.shields.io/badge/Version-1.7.0-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 ## Screenshots
@@ -16,7 +16,8 @@ Interactive top-style terminal dashboard for monitoring any Linux system. Suppor
 
 ## Features
 
-- **Two-column boxed layout** — every section is its own bordered panel; on terminals ≥128 columns panels tile into two columns to use the full screen, collapsing to a single column on narrower terminals
+- **Dynamic boxed layout** — every section is its own bordered panel, placed into whichever column has room rather than a fixed side; up to three columns on wide terminals (≥192 cols), two at ≥128, one below that
+- **Fits the screen** — the layout searches for a configuration that fits: shorter list sections, then a smaller clock, then dropping the clock, then dropping the OS logo
 - **Fully adaptive layout** — header box, panels, and progress bars all resize to the terminal; nothing wraps or misaligns at any width
 - **Runs on any Linux distro** — auto-detects OS and displays a colored ASCII logo
 - **Regular & Pi-hole modes** — system-only monitoring or full Pi-hole dashboard, auto-detected and toggleable at runtime
@@ -117,7 +118,6 @@ Flags can be combined: `healthcheck -r -l -n 3 --ram-limit 90 --webhook https://
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
-| `r` | Force immediate refresh |
 | `l` | Toggle between full and log-only mode |
 | `c` | Toggle CPU info panel |
 | `p` | Toggle Pi-hole / regular mode |
